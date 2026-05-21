@@ -1,0 +1,110 @@
+:root {
+    --bg: #f5f6f7;
+    --card: #ffffff;
+    --text: #1f2937;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --accent-hover: #1d4ed8;
+    --border: #e5e7eb;
+    --shadow: 0 8px 30px rgba(0, 0, 0, 0.08);
+    --radius: 14px;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "SF Pro Display", "Helvetica Neue", Arial, "Noto Sans", "PingFang TC",
+    "PingFang SC", "Microsoft JhengHei", sans-serif;
+}
+
+.container {
+    max-width: 980px;
+    margin: 40px auto;
+    padding: 24px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+}
+
+h1 {
+    margin: 0 0 16px 0;
+    font-size: 26px;
+    font-weight: 700;
+}
+
+label {
+    display: inline-block;
+    margin-right: 10px;
+    color: var(--muted);
+    font-size: 14px;
+}
+
+select {
+    appearance: none;
+    padding: 8px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: #fff;
+    font-size: 14px;
+    color: var(--text);
+}
+
+textarea {
+    width: 100%;
+    margin-top: 14px;
+    padding: 14px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+    font-size: 14px;
+    line-height: 1.5;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: #fdfdfd;
+    color: var(--text);
+    min-height: 360px;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+textarea:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+
+button {
+    margin-top: 14px;
+    padding: 10px 18px;
+    border-radius: 12px;
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 0.05s, background 0.2s;
+}
+
+button:hover {
+    background: var(--accent-hover);
+}
+
+button:active {
+    transform: translateY(1px);
+}
+
+pre {
+    margin-top: 16px;
+    padding: 14px;
+    border-radius: 12px;
+    background: #0b0f19;
+    color: #d1fae5;
+    font-size: 13px;
+    overflow-x: auto;
+}
