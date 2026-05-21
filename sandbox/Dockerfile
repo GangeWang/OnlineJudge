@@ -1,17 +1,10 @@
-FROM debian:bookworm-slim
+FROM ubuntu:24.04
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt update && apt install -y \
     clang \
-    build-essential \
-    ca-certificates \
-    python3 \
-    && rm -rf /var/lib/apt/lists/*
+    g++ \
+    coreutils
 
-# 非 root 執行，降低逃逸後破壞面
-RUN useradd -m -u 1000 -s /usr/sbin/nologin runner
-
-USER 1000:1000
+RUN useradd -m runner
+USER runner
 WORKDIR /work
-
-# 預設 command 可被 docker run 覆蓋
-CMD ["/bin/sh", "-lc", "echo sandbox ready"]

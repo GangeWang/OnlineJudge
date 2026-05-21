@@ -6,17 +6,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      # judge.py 會使用這個 image 來 docker run 測資
-      JUDGE_IMAGE: onlineoj-sandbox:latest
+      - HOST_BACKEND_DIR=/Users/gange/OnlineOJ/backend
     volumes:
-      # backend 需要呼叫 host docker 建立一次性沙箱容器
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./backend/temp:/sandbox-temp
-      - ./backend/problems:/problems:ro
-
-  # 這個 service 主要用來 build 沙箱 image，真正執行時由 backend 動態 docker run
-  sandbox-image:
-    build:
-      context: ./sandbox
-    image: onlineoj-sandbox:latest
-    profiles: ["build-only"]
+      - ./backend:/app
