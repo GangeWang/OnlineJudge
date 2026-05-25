@@ -108,3 +108,44 @@ pre {
     font-size: 13px;
     overflow-x: auto;
 }
+.selectors {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+}
+
+.problem-panel {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 16px;
+    background: #fafafa;
+}
+
+.problem-panel h2 {
+    margin: 0 0 8px;
+    font-size: 20px;
+}
+
+.problem-panel p {
+    margin: 0 0 12px;
+    line-height: 1.5;
+}
+
+.problem-panel h3 {
+    margin: 0 0 8px;
+    font-size: 14px;
+    color: var(--muted);
+}
+
+.sample-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+}
+
+.problem-panel pre {
+    margin: 0;
+    white-space: pre-wrap;
+}
