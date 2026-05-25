@@ -4,39 +4,40 @@ import subprocess
 import shutil
 import glob
 
-TEMP_DIR = "/sandbox-temp"
-PROBLEM_DIR = "/problems"
-
-os.makedirs(TEMP_DIR, exist_ok=True)
-
-TIME_LIMIT = 2  # seconds
-JUDGE_IMAGE = os.getenv("JUDGE_IMAGE", "onlineoj-sandbox")  # 你的沙箱鏡像名稱
+BASE_DIR = "/app"
+HOST_BASE_DIR = os.getenv("HOST_BACKEND_DIR", BASE_DIR)
+TEMP_DIR = os.path.join(BASE_DIR, "temp")
+PROBLEM_DIR = os.path.join(BASE_DIR, "problems")
+TIME_LIMIT = 2
+JUDGE_IMAGE = os.getenv("JUDGE_IMAGE", "onlineoj-sandbox:latest")
 
 
 def judge_submission(language, code, problem_id):
     submission_id = str(uuid.uuid4())
+
     work_dir = os.path.join(TEMP_DIR, submission_id)
-    os.makedirs(work_dir)
+    os.makedirs(work_dir, exist_ok=True)
+    os.chmod(work_dir, 0o777)
 
     try:
         problem_path = os.path.join(PROBLEM_DIR, problem_id)
-        input_files = sorted(glob.glob(os.path.join(problem_path, "input*.txt")))
 
+        input_files = sorted(glob.glob(os.path.join(problem_path, "input*.txt")))
         if not input_files:
-            return {"status": "ERROR", "message": "No testcases found"}
+            return {"status": "ERROR", "message": "No testcases"}
 
         testcases = []
-        for input_file in input_files:
-            output_file = input_file.replace("input", "output")
-            if not os.path.exists(output_file):
-                return {"status": "ERROR", "message": f"Missing output for {input_file}"}
-            testcases.append((input_file, output_file))
-
-        if language == "c":
-            return judge_c(code, testcases, work_dir, problem_path)
+        for inp in input_files:
+            out = inp.replace("input", "output")
+            if not os.path.exists(out):
+                return {"status": "ERROR", "message": f"Missing {out}"}
+            testcases.append((inp, out))
 
         if language == "cpp":
-            return judge_cpp(code, testcases, work_dir, problem_path)
+            return judge_cpp(code, testcases, work_dir)
+
+        if language == "c":
+            return judge_c(code, testcases, work_dir)
 
         return {"status": "ERROR", "message": "Unsupported language"}
 
@@ -44,12 +45,13 @@ def judge_submission(language, code, problem_id):
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
-def run_in_sandbox(work_dir, problem_dir, cmd, timeout=TIME_LIMIT, stdin_text=None):
-    """
-    在沙箱容器內執行 cmd，並回傳 subprocess.CompletedProcess
-    """
+def run_in_sandbox(work_dir, cmd, stdin_text=None, timeout=TIME_LIMIT):
+    rel = os.path.relpath(work_dir, BASE_DIR)
+    host_work_dir = os.path.join(HOST_BASE_DIR, rel)
+
     docker_cmd = [
         "docker", "run", "--rm",
+        "-i",
         "--network", "none",
         "--cpus", "1",
         "--memory", "512m",
@@ -58,9 +60,9 @@ def run_in_sandbox(work_dir, problem_dir, cmd, timeout=TIME_LIMIT, stdin_text=No
         "--tmpfs", "/tmp:rw,size=64m",
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
+        "--security-opt", "seccomp=unconfined",
         "--user", "1000:1000",
-        "-v", f"{work_dir}:/work:rw",
-        "-v", f"{problem_dir}:/problems:ro",
+        "-v", f"{host_work_dir}:/work",
         "-w", "/work",
         JUDGE_IMAGE,
     ] + cmd
@@ -75,70 +77,51 @@ def run_in_sandbox(work_dir, problem_dir, cmd, timeout=TIME_LIMIT, stdin_text=No
     )
 
 
-def judge_c(code, testcases, work_dir, problem_dir):
-    source_file = os.path.join(work_dir, "main.c")
-    with open(source_file, "w") as f:
+def judge_cpp(code, testcases, work_dir):
+    src = os.path.join(work_dir, "main.cpp")
+    with open(src, "w") as f:
         f.write(code)
 
-    compile_cmd = ["clang", "main.c", "-O2", "-std=c11", "-o", "main"]
-    compile_result = run_in_sandbox(work_dir, problem_dir, compile_cmd, timeout=5)
+    compile = run_in_sandbox(work_dir, [
+        "clang++", "main.cpp", "-O2",
+        "-std=c++17", "-o", "main"
+    ])
+    if compile.returncode != 0:
+        return {"status": "CE", "error": compile.stderr}
 
-    if compile_result.returncode != 0:
-        return {"status": "CE", "error": compile_result.stderr}
-
-    run_cmd = ["./main"]
-    return execute_all_testcases(run_cmd, testcases, work_dir, problem_dir)
+    os.chmod(os.path.join(work_dir, "main"), 0o755)
+    return run_tests(["./main"], testcases, work_dir)
 
 
-def judge_cpp(code, testcases, work_dir, problem_dir):
-    source_file = os.path.join(work_dir, "main.cpp")
-    with open(source_file, "w") as f:
+def judge_c(code, testcases, work_dir):
+    src = os.path.join(work_dir, "main.c")
+    with open(src, "w") as f:
         f.write(code)
 
-    compile_cmd = ["clang++", "main.cpp", "-O2", "-std=c++17", "-o", "main"]
-    compile_result = run_in_sandbox(work_dir, problem_dir, compile_cmd, timeout=5)
+    compile = run_in_sandbox(work_dir, ["clang", "main.c", "-O2", "-std=c11", "-o", "main"])
+    if compile.returncode != 0:
+        return {"status": "CE", "error": compile.stderr}
 
-    if compile_result.returncode != 0:
-        return {"status": "CE", "error": compile_result.stderr}
-
-    run_cmd = ["./main"]
-    return execute_all_testcases(run_cmd, testcases, work_dir, problem_dir)
+    os.chmod(os.path.join(work_dir, "main"), 0o755)
+    return run_tests(["./main"], testcases, work_dir)
 
 
-def execute_all_testcases(run_cmd, testcases, work_dir, problem_dir):
-    for idx, (input_file, output_file) in enumerate(testcases, start=1):
-        with open(input_file, "r") as f:
-            testcase_input = f.read()
+def run_tests(run_cmd, testcases, work_dir):
+    for i, (inp, outp) in enumerate(testcases, 1):
+        with open(inp) as f:
+            stdin_text = f.read()
+        expected = open(outp).read().strip()
 
-        with open(output_file, "r") as f:
-            expected_output = f.read().strip()
+        try:
+            res = run_in_sandbox(work_dir, run_cmd, stdin_text)
+        except subprocess.TimeoutExpired:
+            return {"status": "TLE", "case": i}
 
-        result = execute_and_compare(run_cmd, testcase_input, expected_output, idx, work_dir, problem_dir)
-        if result["status"] != "AC":
-            return result
+        if res.returncode == 137:
+            return {"status": "MLE", "case": i}
+        if res.returncode != 0:
+            return {"status": "RE", "case": i, "error": res.stderr}
+        if res.stdout.strip() != expected:
+            return {"status": "WA", "case": i, "expected": expected, "got": res.stdout.strip()}
 
     return {"status": "AC"}
-
-
-def execute_and_compare(run_cmd, testcase_input, expected_output, idx, work_dir, problem_dir):
-    try:
-        result = run_in_sandbox(
-            work_dir, problem_dir, run_cmd, timeout=TIME_LIMIT, stdin_text=testcase_input
-        )
-    except subprocess.TimeoutExpired:
-        return {"status": "TLE", "case": idx}
-
-    if result.returncode != 0:
-        return {"status": "RE", "case": idx, "error": result.stderr}
-
-    user_output = result.stdout.strip()
-
-    if user_output == expected_output:
-        return {"status": "AC"}
-
-    return {
-        "status": "WA",
-        "case": idx,
-        "expected": expected_output,
-        "got": user_output
-    }

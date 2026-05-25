@@ -25,7 +25,7 @@ export default function App() {
         formData.append("code", code);
         formData.append("problem_id", "1001");
 
-        const res = await fetch("http://localhost:8000/submit", {
+        const res = await fetch("/api/submit", {
             method: "POST",
             body: formData,
         });

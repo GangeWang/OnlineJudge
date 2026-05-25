@@ -12,17 +12,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 @app.get("/")
 def root():
     return {"message": "Simple OJ Running"}
 
-
 @app.post("/submit")
-def submit(
-    language: str = Form(...),
-    code: str = Form(...),
-    problem_id: str = Form(...)
-):
-    result = judge_submission(language, code, problem_id)
-    return result
+def submit(language: str = Form(...), code: str = Form(...), problem_id: str = Form(...)):
+    return judge_submission(language, code, problem_id)
