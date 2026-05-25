@@ -16,6 +16,10 @@ app.add_middleware(
 
 PROBLEM_INFO = {
     "1001": {
+        "title": "infix to postfix 四則運算",
+        "description": "輸入中敘式，輸出四則運算後的答案",
+    },
+    "1002": {
         "title": "A + B Problem",
         "description": "讀入兩個整數 a 與 b，輸出 a + b。",
     }
