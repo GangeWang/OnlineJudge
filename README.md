@@ -5,6 +5,7 @@
 - **前端**：React + Vite
 - **後端**：FastAPI
 - **判題沙箱**：Docker 容器（限制 CPU / 記憶體 / 網路）
+- **資料庫**：MariaDB（帳號與答題紀錄）
 
 ---
 
@@ -16,6 +17,7 @@ OnlineJudge/
 ├─ backend/                # 後端 API 與判題邏輯
 │  ├─ main.py              # FastAPI 入口
 │  ├─ judge.py             # 判題核心邏輯
+│  ├─ database.py          # MariaDB 連線、帳密雜湊與答題紀錄
 │  └─ problems/            # 題庫目錄（每題一個資料夾）
 ├─ sandbox/                # 沙箱映像相關檔案
 └─ docker-compose.yml      # 後端服務啟動設定
@@ -36,20 +38,15 @@ OnlineJudge/
 
 ## 2.2 後端環境變數
 
-`backend/judge.py` 使用以下環境變數：
+`backend/judge.py` 與 `backend/database.py` 使用以下環境變數：
 
 - `JUDGE_IMAGE`：判題沙箱映像名稱，預設 `onlineoj-sandbox:latest`
 - `HOST_BACKEND_DIR`：主機上 backend 的絕對路徑，供 Docker in Docker 掛載工作目錄
+- `MARIADB_HOST`：MariaDB host，Docker Compose 內預設為 `mariadb`
+- `MARIADB_PORT`：MariaDB port，預設為 `3306`
+- `MARIADB_USER` / `MARIADB_PASSWORD` / `MARIADB_DATABASE`：資料庫帳號、密碼與資料庫名稱
 
-> 注意：`docker-compose.yml` 目前示範值是個人路徑（`/Users/gange/OnlineOJ/backend`）。
-> 你需要改成自己機器上的實際路徑，否則提交時無法正確掛載暫存程式碼。
-
-範例（Linux/macOS）：
-
-```yaml
-environment:
-  - HOST_BACKEND_DIR=/home/yourname/OnlineJudge/backend
-```
+> 注意：若未設定 `HOST_BACKEND_DIR`，`docker-compose.yml` 會使用 `${PWD}/backend`。如果你的 shell 沒有提供 `PWD`，請改用自己的實際絕對路徑，否則提交時無法正確掛載暫存程式碼。
 
 ---
 
@@ -60,7 +57,7 @@ environment:
 在專案根目錄執行：
 
 ```bash
-docker compose up --build backend
+docker compose up --build backend mariadb
 ```
 
 啟動後 API 預設在：
@@ -165,12 +162,24 @@ PROBLEM_INFO = {
 
 ---
 
-## 6. 判題流程說明
+## 6. 帳號與答題紀錄
+
+後端提供以下帳號 API：
+
+- `POST /register`：欄位 `username`, `password`，建立帳號。密碼會依需求以 `password + username` 作為輸入進行 SHA-256 雜湊後存入 MariaDB。
+- `POST /login`：欄位 `username`, `password`，驗證帳號密碼。
+- `POST /submissions`：欄位 `username`, `password`，取得該帳號最近 100 筆答題紀錄。
+
+答題紀錄會在登入使用者提交後寫入 MariaDB 的 `submissions` 資料表，包含題號、語言、判題狀態、完整判題 JSON 與提交時間。
+
+---
+
+## 7. 判題流程說明
 
 提交 API：
 
 - `POST /submit`
-- 欄位：`language`, `code`, `problem_id`
+- 欄位：`language`, `code`, `problem_id`, `username`, `password`
 
 目前支援語言：
 
@@ -189,26 +198,28 @@ PROBLEM_INFO = {
 
 ---
 
-## 7. API 快速測試
+## 8. API 快速測試
 
-## 7.1 取得題目列表
+## 8.1 取得題目列表
 
 ```bash
 curl http://localhost:8000/problems
 ```
 
-## 7.2 提交 C++ 程式
+## 8.2 提交 C++ 程式
 
 ```bash
 curl -X POST http://localhost:8000/submit \
   -F "language=cpp" \
   -F "problem_id=1001" \
+  -F "username=demo" \
+  -F "password=demo123" \
   -F 'code=#include <bits/stdc++.h>\nusing namespace std;\nint main(){cout<<"hello";}'
 ```
 
 ---
 
-## 8. 常見問題（FAQ）
+## 9. 常見問題（FAQ）
 
 1. **提交後出現 `No testcases`**
    - 檢查 `backend/problems/<problem_id>/` 下是否有 `input*.txt`。
@@ -221,7 +232,7 @@ curl -X POST http://localhost:8000/submit \
 
 ---
 
-## 9. 建議維運做法
+## 10. 建議維運做法
 
 - 新增題目時，先放至少 1 組 sample（`input1/output1`）。
 - 測資請避免尾端多餘空白，以免比對誤差。
