@@ -149,3 +149,79 @@ pre {
     margin: 0;
     white-space: pre-wrap;
 }
+
+.app-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 18px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+}
+
+.auth-panel,
+.history-panel {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px;
+    background: #fafafa;
+}
+
+.auth-fields,
+.auth-actions,
+.history-header {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+input {
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    font-size: 14px;
+}
+
+.secondary-button {
+    border-color: var(--border);
+    background: #fff;
+    color: var(--text);
+}
+
+.secondary-button:hover {
+    background: #f3f4f6;
+}
+
+.current-user,
+.auth-message,
+.empty-history {
+    margin-top: 10px;
+    color: var(--muted);
+    font-size: 14px;
+}
+
+.history-panel {
+    margin-top: 18px;
+}
+
+.history-header {
+    justify-content: space-between;
+}
+
+.history-header h2 {
+    margin: 0;
+}
+
+table {
+    width: 100%;
+    margin-top: 12px;
+    border-collapse: collapse;
+    font-size: 14px;
+}
+
+th,
+td {
+    padding: 10px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+}
