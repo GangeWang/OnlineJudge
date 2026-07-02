@@ -7,28 +7,13 @@ services:
       - "8000:8000"
     environment:
       - HOST_BACKEND_DIR=${HOST_BACKEND_DIR:-${PWD}/backend}
-      - MARIADB_HOST=mariadb
+      - MARIADB_HOST=host.docker.internal
       - MARIADB_PORT=3306
       - MARIADB_USER=onlinejudge
       - MARIADB_PASSWORD=onlinejudge
       - MARIADB_DATABASE=onlinejudge
-    depends_on:
-      - mariadb
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./backend:/app
-
-  mariadb:
-    image: mariadb:11
-    environment:
-      - MARIADB_ROOT_PASSWORD=onlinejudge-root
-      - MARIADB_DATABASE=onlinejudge
-      - MARIADB_USER=onlinejudge
-      - MARIADB_PASSWORD=onlinejudge
-    ports:
-      - "3306:3306"
-    volumes:
-      - mariadb-data:/var/lib/mysql
-
 volumes:
   mariadb-data:
