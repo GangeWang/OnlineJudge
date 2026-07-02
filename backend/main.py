@@ -108,7 +108,13 @@ def submit(
         raise HTTPException(status_code=401, detail="請先登入後再提交")
 
     result = judge_submission(language, code, problem_id)
-    submission_id = save_submission(user["id"], problem_id, language, result)
+    submission_id = save_submission(
+        user["id"],
+        user["username"],
+        problem_id,
+        language,
+        result
+    )
     return {**result, "submission_id": submission_id}
 
 

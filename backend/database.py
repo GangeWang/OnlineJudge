@@ -8,7 +8,7 @@ import pymysql
 from pymysql.cursors import DictCursor
 
 DB_CONFIG = {
-    "host": os.getenv("MARIADB_HOST", "mariadb"),
+    "host": os.getenv("MARIADB_HOST", "host.docker.internal"),
     "port": int(os.getenv("MARIADB_PORT", "3306")),
     "user": os.getenv("MARIADB_USER", "onlinejudge"),
     "password": os.getenv("MARIADB_PASSWORD", "onlinejudge"),
@@ -51,19 +51,21 @@ def init_db(max_attempts: int = 20, delay_seconds: float = 1.5):
                     )
                     cursor.execute(
                         """
-                        CREATE TABLE IF NOT EXISTS submissions (
-                            id INT AUTO_INCREMENT PRIMARY KEY,
-                            user_id INT NOT NULL,
-                            problem_id VARCHAR(32) NOT NULL,
-                            language VARCHAR(16) NOT NULL,
-                            status VARCHAR(16) NOT NULL,
-                            result_json JSON NOT NULL,
-                            submitted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                            INDEX idx_submissions_user_time (user_id, submitted_at),
-                            CONSTRAINT fk_submissions_user
-                                FOREIGN KEY (user_id) REFERENCES users(id)
-                                ON DELETE CASCADE
-                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                            CREATE TABLE IF NOT EXISTS submissions (
+                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                user_id INT NOT NULL,
+                                username VARCHAR(64) NOT NULL,
+                                problem_id VARCHAR(32) NOT NULL,
+                                language VARCHAR(16) NOT NULL,
+                                status VARCHAR(16) NOT NULL,
+                                result_json JSON NOT NULL,
+                                submitted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                                INDEX idx_submissions_user_time (user_id, submitted_at),
+                                INDEX idx_submissions_username_time (username, submitted_at),
+                                CONSTRAINT fk_submissions_user
+                                    FOREIGN KEY (user_id) REFERENCES users(id)
+                                    ON DELETE CASCADE
+                            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
                         """
                     )
             return
@@ -96,7 +98,7 @@ def authenticate_user(username: str, password: str):
     return {"id": user["id"], "username": user["username"]}
 
 
-def save_submission(user_id: int, problem_id: str, language: str, result: dict):
+def save_submission(user_id: int, username: str, problem_id: str, language: str, result: dict):
     import json
 
     status = result.get("status", "UNKNOWN")
@@ -104,10 +106,10 @@ def save_submission(user_id: int, problem_id: str, language: str, result: dict):
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT INTO submissions (user_id, problem_id, language, status, result_json)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO submissions (user_id, username, problem_id, language, status, result_json)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 """,
-                (user_id, problem_id, language, status, json.dumps(result, ensure_ascii=False)),
+                (user_id, username, problem_id, language, status, json.dumps(result, ensure_ascii=False)),
             )
             return cursor.lastrowid
 
@@ -117,11 +119,11 @@ def list_submissions(user_id: int):
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT id, problem_id, language, status, result_json, submitted_at
-                FROM submissions
-                WHERE user_id = %s
-                ORDER BY submitted_at DESC, id DESC
-                LIMIT 100
+                    SELECT id, username, problem_id, language, status, result_json, submitted_at
+                    FROM submissions
+                    WHERE user_id = %s
+                    ORDER BY submitted_at DESC, id DESC
+                    LIMIT 100
                 """,
                 (user_id,),
             )
