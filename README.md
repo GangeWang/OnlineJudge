@@ -13,72 +13,77 @@
 
 ```text
 OnlineJudge/
-├─ front/                  # 前端專案（React）
+├─ front/                  # 前端專案（React + Vite）
 ├─ backend/                # 後端 API 與判題邏輯
 │  ├─ main.py              # FastAPI 入口
 │  ├─ judge.py             # 判題核心邏輯
-│  ├─ database.py          # MariaDB 連線、帳密雜湊與答題紀錄
+│  ├─ database.py          # MariaDB 連線與資料操作
+│  ├─ requirements.txt     # 後端套件
 │  └─ problems/            # 題庫目錄（每題一個資料夾）
 ├─ sandbox/                # 沙箱映像相關檔案
-└─ docker-compose.yml      # 後端服務啟動設定
+└─ docker-compose.yml      # 後端容器啟動設定
 ```
 
 ---
 
-## 2. 環境配置
+## 2. 先決條件
 
-## 2.1 必要工具
+請先安裝以下工具：
 
-請先安裝以下軟體：
-
-1. **Docker**（必須，可用於判題沙箱）
+1. **Docker**
 2. **Docker Compose**（或 `docker compose`）
 3. **Node.js 18+**（前端）
-4. **Python 3.10+**（本機直接跑後端時需要）
-
-## 2.2 後端環境變數
-
-`backend/judge.py` 與 `backend/database.py` 使用以下環境變數：
-
-- `JUDGE_IMAGE`：判題沙箱映像名稱，預設 `onlineoj-sandbox:latest`
-- `HOST_BACKEND_DIR`：主機上 backend 的絕對路徑，供 Docker in Docker 掛載工作目錄
-- `MARIADB_HOST`：MariaDB host，Docker Compose 內預設為 `mariadb`
-- `MARIADB_PORT`：MariaDB port，預設為 `3306`
-- `MARIADB_USER` / `MARIADB_PASSWORD` / `MARIADB_DATABASE`：資料庫帳號、密碼與資料庫名稱
-
-> 注意：若未設定 `HOST_BACKEND_DIR`，`docker-compose.yml` 會使用 `${PWD}/backend`。如果你的 shell 沒有提供 `PWD`，請改用自己的實際絕對路徑，否則提交時無法正確掛載暫存程式碼。
+4. **Python 3.10+**（本機直接執行後端時）
 
 ---
 
-## 3. 啟動方式
+## 3. 環境變數說明（後端）
 
-## 3.1 啟動後端（建議）
+後端主要使用以下變數：
+
+- `JUDGE_IMAGE`：判題沙箱映像名稱（預設：`onlineoj-sandbox:latest`）
+- `HOST_BACKEND_DIR`：主機上 `backend` 的**絕對路徑**（提供沙箱掛載）
+- `MARIADB_HOST`
+- `MARIADB_PORT`（預設 `3306`）
+- `MARIADB_USER`
+- `MARIADB_PASSWORD`
+- `MARIADB_DATABASE`
+
+目前 `docker-compose.yml` 內 `backend` 服務預設為：
+
+- `HOST_BACKEND_DIR=${HOST_BACKEND_DIR:-${PWD}/backend}`
+- `MARIADB_HOST=host.docker.internal`
+- `MARIADB_PORT=3306`
+- `MARIADB_USER=onlinejudge`
+- `MARIADB_PASSWORD=onlinejudge`
+- `MARIADB_DATABASE=onlinejudge`
+
+> 若你的環境沒有 `PWD`，請手動設定 `HOST_BACKEND_DIR` 為實際絕對路徑，避免判題掛載失敗。
+
+---
+
+## 4. 啟動方式
+
+### 4.1 使用 Docker Compose（後端）
 
 在專案根目錄執行：
 
 ```bash
-docker compose up --build backend mariadb
+docker compose up -d --build
 ```
 
-啟動後 API 預設在：
+後端服務啟動後預設對外埠為：
 
-- `http://localhost:8000/`
+- `http://localhost:8000`
 
-可先測試：
+> 目前 `docker-compose.yml` 僅啟動 `backend`，不包含前端與 MariaDB 容器。  
+> `MARIADB_HOST` 預設是 `host.docker.internal`，代表你需要在主機端先有可連線的 MariaDB。
 
-```bash
-curl http://localhost:8000/
-```
+---
 
-預期回傳：
+### 4.2 前端啟動（本機開發）
 
-```json
-{"message":"Simple OJ Running"}
-```
-
-## 3.2 啟動前端
-
-另開一個終端機：
+進入前端目錄後執行：
 
 ```bash
 cd front
@@ -86,154 +91,65 @@ npm install
 npm run dev
 ```
 
-前端預設網址（Vite）：
-
-- `http://localhost:5173/`
-
----
-
-## 4. 如何「入題庫」（新增題目）
-
-題庫根目錄：
-
-- `backend/problems/`
-
-每一題使用一個資料夾，資料夾名稱就是 `problem_id`，例如 `1003`：
-
-```text
-backend/problems/1003/
-├─ input1.txt
-├─ output1.txt
-├─ input2.txt
-├─ output2.txt
-└─ ...
-```
-
-規則：
-
-1. 測資檔名必須是 `inputN.txt` / `outputN.txt` 成對。
-2. `N` 建議從 `1` 開始連續編號。
-3. 若缺少任一對應 `output` 檔，提交會回傳錯誤。
-4. 系統會依檔名排序逐一測試，任一組錯誤即停止並回傳該測資編號。
-
-最小範例：
-
-```text
-backend/problems/1003/input1.txt
-backend/problems/1003/output1.txt
-```
-
----
-
-## 5. 題目敘述設定
-
-目前題目標題與敘述定義在：
-
-- `backend/main.py` 的 `PROBLEM_INFO` 字典
-
-範例：
-
-```python
-PROBLEM_INFO = {
-    "1001": {
-        "title": "infix to postfix 四則運算",
-        "description": "輸入中敘式，輸出四則運算後的答案",
-    },
-    "1002": {
-        "title": "A + B Problem",
-        "description": "讀入兩個整數 a 與 b，輸出 a + b。",
-    }
-}
-```
-
-若你新增了 `backend/problems/1003`，也建議同步在 `PROBLEM_INFO` 新增：
-
-```python
-"1003": {
-    "title": "題目名稱",
-    "description": "題目敘述內容",
-}
-```
-
-若未設定，系統會顯示預設值：
-
-- title: `Problem <problem_id>`
-- description: `尚無題目敘述。`
-
----
-
-## 6. 帳號與答題紀錄
-
-後端提供以下帳號 API：
-
-- `POST /register`：欄位 `username`, `password`，建立帳號。密碼會依需求以 `password + username` 作為輸入進行 SHA-256 雜湊後存入 MariaDB。
-- `POST /login`：欄位 `username`, `password`，驗證帳號密碼。
-- `POST /submissions`：欄位 `username`, `password`，取得該帳號最近 100 筆答題紀錄。
-
-答題紀錄會在登入使用者提交後寫入 MariaDB 的 `submissions` 資料表，包含題號、語言、判題狀態、完整判題 JSON 與提交時間。
-
----
-
-## 7. 判題流程說明
-
-提交 API：
-
-- `POST /submit`
-- 欄位：`language`, `code`, `problem_id`, `username`, `password`
-
-目前支援語言：
-
-- `c`
-- `cpp`
-
-判題結果可能包含：
-
-- `AC`：全部通過
-- `WA`：答案錯誤
-- `CE`：編譯錯誤
-- `RE`：執行期錯誤
-- `TLE`：超時
-- `MLE`：記憶體超限（容器被系統終止）
-- `ERROR`：題庫缺漏或參數問題
-
----
-
-## 8. API 快速測試
-
-## 8.1 取得題目列表
+其他可用指令（來自 `front/package.json`）：
 
 ```bash
-curl http://localhost:8000/problems
+npm run build
+npm run preview
 ```
 
-## 8.2 提交 C++ 程式
+---
+
+### 4.3 後端本機啟動（不透過 Docker）
 
 ```bash
-curl -X POST http://localhost:8000/submit \
-  -F "language=cpp" \
-  -F "problem_id=1001" \
-  -F "username=demo" \
-  -F "password=demo123" \
-  -F 'code=#include <bits/stdc++.h>\nusing namespace std;\nint main(){cout<<"hello";}'
+cd backend
+pip install -r requirements.txt
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
----
+`backend/requirements.txt` 目前包含：
 
-## 9. 常見問題（FAQ）
-
-1. **提交後出現 `No testcases`**
-   - 檢查 `backend/problems/<problem_id>/` 下是否有 `input*.txt`。
-
-2. **提交一直 `ERROR` 或找不到暫存檔**
-   - 檢查 `HOST_BACKEND_DIR` 是否為你的真實絕對路徑。
-
-3. **前端讀不到 API**
-   - 確認後端是否在 `8000` port 啟動，並檢查前端 API base URL 設定。
+- fastapi
+- uvicorn
+- python-multipart
+- pymysql
 
 ---
 
-## 10. 建議維運做法
+## 5. 資料庫設定建議
 
-- 新增題目時，先放至少 1 組 sample（`input1/output1`）。
-- 測資請避免尾端多餘空白，以免比對誤差。
-- 若要擴充語言（如 Python），可在 `backend/judge.py` 新增對應 `judge_xxx` 流程。
+請先確認 MariaDB 已建立：
+
+- 資料庫：`onlinejudge`
+- 使用者：`onlinejudge`
+- 密碼：`onlinejudge`
+- 連線位址：`host.docker.internal:3306`（依你的環境可調整）
+
+若你使用 Linux，`host.docker.internal` 可能無法直接使用，請改為實際主機 IP 或將 DB 改成同一個 compose 內服務名稱。
+
+---
+
+## 6. 常見問題
+
+### Q1：提交後判題找不到掛載路徑
+- 檢查 `HOST_BACKEND_DIR` 是否為主機上的 `backend` 絕對路徑。
+- 確認 Docker 有掛載 `/var/run/docker.sock`（compose 已設定）。
+
+### Q2：後端啟動但資料庫連不上
+- 檢查 MariaDB 是否真的在 `MARIADB_HOST:MARIADB_PORT` 上可連線。
+- 確認帳號密碼與資料庫名稱一致。
+- Linux 環境若使用 `host.docker.internal` 失敗，請改用主機 IP。
+
+### Q3：前端可以開啟但 API 失敗
+- 確認後端有在 `:8000` 運行。
+- 檢查前端 API base URL 是否指向正確主機與埠號。
+
+---
+
+## 7. 開發流程建議
+
+1. 先啟動 MariaDB
+2. 啟動後端（Docker 或本機）
+3. 啟動前端（`front/`）
+4. 透過前端提交程式碼，觀察後端判題與資料庫寫入結果
