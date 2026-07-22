@@ -2,7 +2,9 @@ version: "3.9"
 
 services:
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+    image: onlineoj-backend:latest
     ports:
       - "8000:8000"
     environment:
@@ -15,5 +17,8 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./backend:/app
-volumes:
-  mariadb-data:
+
+  sandbox:
+    build:
+      context: ./sandbox
+    image: onlineoj-sandbox:latest

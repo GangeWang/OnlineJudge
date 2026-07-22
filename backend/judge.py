@@ -48,33 +48,51 @@ def judge_submission(language, code, problem_id):
 def run_in_sandbox(work_dir, cmd, stdin_text=None, timeout=TIME_LIMIT):
     rel = os.path.relpath(work_dir, BASE_DIR)
     host_work_dir = os.path.join(HOST_BASE_DIR, rel)
-
+    container_name = f"oj-{uuid.uuid4()}"
     docker_cmd = [
         "docker", "run", "--rm",
+        "--init",
+        "--name",
+        container_name,
         "-i",
         "--network", "none",
         "--cpus", "1",
         "--memory", "512m",
-        "--pids-limit", "128",
+        "--pids-limit", "32",
         "--read-only",
         "--tmpfs", "/tmp:rw,size=64m",
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
-        "--security-opt", "seccomp=unconfined",
         "--user", "1000:1000",
         "-v", f"{host_work_dir}:/work",
         "-w", "/work",
         JUDGE_IMAGE,
+
     ] + cmd
 
-    return subprocess.run(
-        docker_cmd,
-        input=stdin_text,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=timeout
-    )
+    try:
+        return subprocess.run(
+            docker_cmd,
+            input=stdin_text,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
+
+    except subprocess.TimeoutExpired:
+
+        subprocess.run(
+            [
+                "docker",
+                "kill",
+                container_name
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        raise
 
 
 def judge_cpp(code, testcases, work_dir):
