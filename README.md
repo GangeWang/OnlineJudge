@@ -57,7 +57,7 @@ OnlineJudge/
 在專案根目錄執行：
 
 ```bash
-docker compose up --build backend mariadb
+docker compose up --build backend
 ```
 
 啟動後 API 預設在：
