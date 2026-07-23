@@ -74,7 +74,7 @@ MARIADB_DATABASE=onlinejudge
 在專案根目錄執行：
 
 ```bash
-docker compose up -d --build
+docker compose up --build
 ```
 
 啟動成功後：
@@ -316,7 +316,7 @@ http://localhost:8000
 Docker：
 
 ```bash
-docker compose up -d --build
+docker compose up --build
 ```
 
 或本機：
