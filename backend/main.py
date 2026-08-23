@@ -1,13 +1,25 @@
 from pathlib import Path
 
-from fastapi import FastAPI, Form, HTTPException
+import logging
+from uuid import UUID
+
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from judge import judge_submission
 from pymysql.err import IntegrityError
 
-from database import authenticate_user, create_user, init_db, list_submissions, save_submission
+from database import (
+    authenticate_user,
+    create_user,
+    init_db,
+    list_login_alerts_for_user,
+    list_submissions,
+    record_login,
+    save_submission,
+)
 
 app = FastAPI()
+logger = logging.getLogger(__name__)
 
 
 @app.on_event("startup")
@@ -87,12 +99,42 @@ def register(username: str = Form(...), password: str = Form(...)):
         raise HTTPException(status_code=409, detail="帳號已存在")
 
 
+def client_ip(request: Request) -> str:
+    """Use the connection IP; configure a trusted proxy to preserve client IPs."""
+    return request.client.host if request.client else "unknown"
+
+
+def validate_login_device(device_id: str) -> str:
+    try:
+        return str(UUID(device_id))
+    except (TypeError, ValueError, AttributeError):
+        raise HTTPException(status_code=400, detail="無效的裝置識別碼")
+
+
 @app.post("/login")
-def login(username: str = Form(...), password: str = Form(...)):
+def login(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    device_id: str = Form(...),
+):
     user = authenticate_user(username.strip(), password)
     if user is None:
         raise HTTPException(status_code=401, detail="帳號或密碼錯誤")
-    return {"user": user}
+    device_id = validate_login_device(device_id)
+    ip = client_ip(request)
+    alerts, new_alert = record_login(user["id"], ip, device_id)
+    if new_alert:
+        logger.warning("Possible concurrent login detected for user_id=%s from IP %s", user["id"], ip)
+    return {"user": user, "login_alerts": alerts}
+
+
+@app.post("/login-alerts")
+def login_alerts(username: str = Form(...), password: str = Form(...)):
+    user = authenticate_user(username.strip(), password)
+    if user is None:
+        raise HTTPException(status_code=401, detail="帳號或密碼錯誤")
+    return list_login_alerts_for_user(user["id"])
 
 
 @app.post("/submit")

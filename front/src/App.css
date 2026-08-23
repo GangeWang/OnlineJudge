@@ -182,3 +182,16 @@
     border-right-color: var(--border);
   }
 }
+
+.login-alert {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border: 1px solid #d97706;
+    border-radius: 6px;
+    background: #fffbeb;
+    color: #92400e;
+}
+
+.login-alert p {
+    margin: 6px 0 0;
+}

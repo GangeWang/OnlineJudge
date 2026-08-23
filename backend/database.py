@@ -51,6 +51,39 @@ def init_db(max_attempts: int = 20, delay_seconds: float = 1.5):
                     )
                     cursor.execute(
                         """
+                        CREATE TABLE IF NOT EXISTS login_events (
+                            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                            user_id INT NOT NULL,
+                            ip_address VARCHAR(45) NOT NULL,
+                            device_id CHAR(36) NOT NULL,
+                            logged_in_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            INDEX idx_login_events_user_time (user_id, logged_in_at),
+                            CONSTRAINT fk_login_events_user
+                                FOREIGN KEY (user_id) REFERENCES users(id)
+                                ON DELETE CASCADE
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                        """
+                    )
+                    cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS login_security_alerts (
+                            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                            user_id INT NOT NULL,
+                            first_ip_address VARCHAR(45) NOT NULL,
+                            first_device_id CHAR(36) NOT NULL,
+                            first_logged_in_at TIMESTAMP NOT NULL,
+                            second_ip_address VARCHAR(45) NOT NULL,
+                            second_device_id CHAR(36) NOT NULL,
+                            second_logged_in_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            INDEX idx_login_alerts_user_time (user_id, second_logged_in_at),
+                            CONSTRAINT fk_login_alerts_user
+                                FOREIGN KEY (user_id) REFERENCES users(id)
+                                ON DELETE CASCADE
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                        """
+                    )
+                    cursor.execute(
+                        """
                             CREATE TABLE IF NOT EXISTS submissions (
                                 id INT AUTO_INCREMENT PRIMARY KEY,
                                 user_id INT NOT NULL,
@@ -96,6 +129,89 @@ def authenticate_user(username: str, password: str):
     if not user or user["password_hash"] != hash_password(username, password):
         return None
     return {"id": user["id"], "username": user["username"]}
+
+
+def record_login(user_id: int, ip_address: str, device_id: str):
+    """Store a login and return active alerts plus whether this login triggered one."""
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id
+                FROM login_events
+                WHERE user_id = %s
+                  AND device_id = %s
+                  AND logged_in_at >= UTC_TIMESTAMP() - INTERVAL 3 HOUR
+                LIMIT 1
+                """,
+                (user_id, device_id),
+            )
+            if cursor.fetchone():
+                # A page reload signs in again with the same browser-local ID.
+                # Do not create another event or a false cross-device alert.
+                return list_login_alerts(connection, user_id), False
+
+            cursor.execute(
+                """
+                SELECT ip_address, device_id, logged_in_at
+                FROM login_events
+                WHERE user_id = %s
+                  AND logged_in_at >= UTC_TIMESTAMP() - INTERVAL 3 HOUR
+                  AND device_id <> %s
+                ORDER BY logged_in_at DESC
+                LIMIT 1
+                """,
+                (user_id, device_id),
+            )
+            previous_login = cursor.fetchone()
+            cursor.execute(
+                "INSERT INTO login_events (user_id, ip_address, device_id) VALUES (%s, %s, %s)",
+                (user_id, ip_address, device_id),
+            )
+            if previous_login:
+                cursor.execute(
+                    """
+                    INSERT INTO login_security_alerts (
+                        user_id, first_ip_address, first_device_id, first_logged_in_at,
+                        second_ip_address, second_device_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        user_id,
+                        previous_login["ip_address"],
+                        previous_login["device_id"],
+                        previous_login["logged_in_at"],
+                        ip_address,
+                        device_id,
+                    ),
+                )
+        return list_login_alerts(connection, user_id), previous_login is not None
+
+
+def list_login_alerts_for_user(user_id: int):
+    with get_connection() as connection:
+        return list_login_alerts(connection, user_id)
+
+
+def list_login_alerts(connection, user_id: int):
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id, first_ip_address, first_device_id, first_logged_in_at,
+                   second_ip_address, second_device_id, second_logged_in_at
+            FROM login_security_alerts
+            WHERE user_id = %s
+              AND second_logged_in_at >= UTC_TIMESTAMP() - INTERVAL 3 HOUR
+            ORDER BY second_logged_in_at DESC, id DESC
+            """,
+            (user_id,),
+        )
+        alerts = cursor.fetchall()
+    for alert in alerts:
+        for field in ("first_logged_in_at", "second_logged_in_at"):
+            if isinstance(alert[field], datetime):
+                alert[field] = alert[field].isoformat()
+    return alerts
 
 
 def save_submission(user_id: int, username: str, problem_id: str, language: str, result: dict):
