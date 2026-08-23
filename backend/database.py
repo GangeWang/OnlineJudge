@@ -58,6 +58,7 @@ def init_db(max_attempts: int = 20, delay_seconds: float = 1.5):
                             device_id CHAR(36) NOT NULL,
                             logged_in_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                             INDEX idx_login_events_user_time (user_id, logged_in_at),
+                            INDEX idx_login_events_device_time (device_id, logged_in_at),
                             CONSTRAINT fk_login_events_user
                                 FOREIGN KEY (user_id) REFERENCES users(id)
                                 ON DELETE CASCADE
@@ -148,8 +149,14 @@ def record_login(user_id: int, ip_address: str, device_id: str):
             )
             if cursor.fetchone():
                 # A page reload signs in again with the same browser-local ID.
-                # Do not create another event or a false cross-device alert.
-                return list_login_alerts(connection, user_id), None
+                # Do not create another event. Keep the alert visible only on
+                # the later device that originally caused the alert.
+                active_alerts = list_login_alerts(connection, user_id)
+                current_device_alert = next(
+                    (alert for alert in active_alerts if alert["second_device_id"] == device_id),
+                    None,
+                )
+                return active_alerts, current_device_alert
 
             cursor.execute(
                 """
@@ -216,6 +223,26 @@ def is_submission_blocked(user_id: int, device_id: str) -> bool:
                 (user_id, device_id),
             )
             return cursor.fetchone() is not None
+
+
+def find_recent_other_user_on_device(user_id: int, device_id: str):
+    """Return another account that used this browser device in the last three hours."""
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT users.id, users.username, login_events.ip_address, login_events.logged_in_at
+                FROM login_events
+                JOIN users ON users.id = login_events.user_id
+                WHERE login_events.device_id = %s
+                  AND login_events.user_id <> %s
+                  AND login_events.logged_in_at >= UTC_TIMESTAMP() - INTERVAL 3 HOUR
+                ORDER BY login_events.logged_in_at DESC
+                LIMIT 1
+                """,
+                (device_id, user_id),
+            )
+            return cursor.fetchone()
 
 
 def list_login_alerts(connection, user_id: int):

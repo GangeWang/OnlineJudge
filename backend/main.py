@@ -11,6 +11,7 @@ from pymysql.err import IntegrityError
 from database import (
     authenticate_user,
     create_user,
+    find_recent_other_user_on_device,
     init_db,
     is_submission_blocked,
     list_login_alerts_for_user,
@@ -124,6 +125,19 @@ def login(
         raise HTTPException(status_code=401, detail="帳號或密碼錯誤")
     device_id = validate_login_device(device_id)
     ip = client_ip(request)
+    other_user = find_recent_other_user_on_device(user["id"], device_id)
+    if other_user:
+        logger.warning(
+            "Multiple-account login blocked username=%s user_id=%s ip=%s "
+            "browser_device_id=%s previous_username=%s previous_user_id=%s",
+            user["username"],
+            user["id"],
+            ip,
+            device_id,
+            other_user["username"],
+            other_user["id"],
+        )
+        raise HTTPException(status_code=403, detail="此裝置三小時內已登入其他帳號，暫時無法登入")
     _, new_alert = record_login(user["id"], ip, device_id)
     if new_alert:
         logger.warning(
