@@ -125,7 +125,17 @@ def login(
     ip = client_ip(request)
     alerts, new_alert = record_login(user["id"], ip, device_id)
     if new_alert:
-        logger.warning("Possible concurrent login detected for user_id=%s from IP %s", user["id"], ip)
+        logger.warning(
+            "Cross-device login warning username=%s user_id=%s "
+            "first_ip=%s first_browser_device_id=%s "
+            "attempted_ip=%s attempted_browser_device_id=%s",
+            user["username"],
+            user["id"],
+            new_alert["first_ip_address"],
+            new_alert["first_device_id"],
+            new_alert["second_ip_address"],
+            new_alert["second_device_id"],
+        )
     return {"user": user, "login_alerts": alerts}
 
 

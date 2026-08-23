@@ -132,7 +132,7 @@ def authenticate_user(username: str, password: str):
 
 
 def record_login(user_id: int, ip_address: str, device_id: str):
-    """Store a login and return active alerts plus whether this login triggered one."""
+    """Store a login and return active alerts plus the newly created alert, if any."""
     with get_connection() as connection:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -149,7 +149,7 @@ def record_login(user_id: int, ip_address: str, device_id: str):
             if cursor.fetchone():
                 # A page reload signs in again with the same browser-local ID.
                 # Do not create another event or a false cross-device alert.
-                return list_login_alerts(connection, user_id), False
+                return list_login_alerts(connection, user_id), None
 
             cursor.execute(
                 """
@@ -164,11 +164,18 @@ def record_login(user_id: int, ip_address: str, device_id: str):
                 (user_id, device_id),
             )
             previous_login = cursor.fetchone()
+            new_alert = None
             cursor.execute(
                 "INSERT INTO login_events (user_id, ip_address, device_id) VALUES (%s, %s, %s)",
                 (user_id, ip_address, device_id),
             )
             if previous_login:
+                new_alert = {
+                    "first_ip_address": previous_login["ip_address"],
+                    "first_device_id": previous_login["device_id"],
+                    "second_ip_address": ip_address,
+                    "second_device_id": device_id,
+                }
                 cursor.execute(
                     """
                     INSERT INTO login_security_alerts (
@@ -178,14 +185,14 @@ def record_login(user_id: int, ip_address: str, device_id: str):
                     """,
                     (
                         user_id,
-                        previous_login["ip_address"],
-                        previous_login["device_id"],
+                        new_alert["first_ip_address"],
+                        new_alert["first_device_id"],
                         previous_login["logged_in_at"],
-                        ip_address,
-                        device_id,
+                        new_alert["second_ip_address"],
+                        new_alert["second_device_id"],
                     ),
                 )
-        return list_login_alerts(connection, user_id), previous_login is not None
+        return list_login_alerts(connection, user_id), new_alert
 
 
 def list_login_alerts_for_user(user_id: int):
