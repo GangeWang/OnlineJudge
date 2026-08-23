@@ -87,20 +87,6 @@ export default function App() {
 
     const credentials = { username, password };
 
-    const loadLoginAlerts = async () => {
-        if (!username || !password) return;
-        const alerts = await postForm("/api/login-alerts", credentials);
-        setLoginAlerts(alerts);
-    };
-
-    useEffect(() => {
-        if (!currentUser) return undefined;
-        const intervalId = window.setInterval(() => {
-            loadLoginAlerts().catch(() => {});
-        }, 30000);
-        return () => window.clearInterval(intervalId);
-    }, [currentUser, username, password]);
-
     const loadSubmissions = async () => {
         if (!username || !password) return;
         const data = await postForm("/api/submissions", credentials);
@@ -112,7 +98,7 @@ export default function App() {
         try {
             const data = await postForm(`/api/${mode}`, mode === "login" ? { ...credentials, device_id: deviceId() } : credentials);
             setCurrentUser(data.user);
-            setLoginAlerts(data.login_alerts || []);
+            setLoginAlerts(data.login_alert ? [data.login_alert] : []);
             setAuthMessage(`${mode === "register" ? "註冊" : "登入"}成功：${data.user.username}`);
             await loadSubmissions();
         } catch (error) {
@@ -133,6 +119,7 @@ export default function App() {
                 language,
                 code,
                 problem_id: problemId,
+                device_id: deviceId(),
                 ...credentials,
             });
             setResult(JSON.stringify(data, null, 2));

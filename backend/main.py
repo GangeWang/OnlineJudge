@@ -12,6 +12,7 @@ from database import (
     authenticate_user,
     create_user,
     init_db,
+    is_submission_blocked,
     list_login_alerts_for_user,
     list_submissions,
     record_login,
@@ -123,7 +124,7 @@ def login(
         raise HTTPException(status_code=401, detail="帳號或密碼錯誤")
     device_id = validate_login_device(device_id)
     ip = client_ip(request)
-    alerts, new_alert = record_login(user["id"], ip, device_id)
+    _, new_alert = record_login(user["id"], ip, device_id)
     if new_alert:
         logger.warning(
             "Cross-device login warning username=%s user_id=%s "
@@ -136,7 +137,7 @@ def login(
             new_alert["second_ip_address"],
             new_alert["second_device_id"],
         )
-    return {"user": user, "login_alerts": alerts}
+    return {"user": user, "login_alert": new_alert}
 
 
 @app.post("/login-alerts")
@@ -154,10 +155,16 @@ def submit(
     problem_id: str = Form(...),
     username: str = Form(...),
     password: str = Form(...),
+    device_id: str = Form(...),
 ):
     user = authenticate_user(username.strip(), password)
     if user is None:
         raise HTTPException(status_code=401, detail="請先登入後再提交")
+    if is_submission_blocked(user["id"], validate_login_device(device_id)):
+        raise HTTPException(
+            status_code=403,
+            detail="偵測到三小時內有異地登入，後登入的裝置暫時無法提交答案",
+        )
 
     result = judge_submission(language, code, problem_id)
     submission_id = save_submission(

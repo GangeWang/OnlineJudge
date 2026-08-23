@@ -200,6 +200,24 @@ def list_login_alerts_for_user(user_id: int):
         return list_login_alerts(connection, user_id)
 
 
+def is_submission_blocked(user_id: int, device_id: str) -> bool:
+    """Only the device that triggered a recent cross-device alert is blocked."""
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM login_security_alerts
+                WHERE user_id = %s
+                  AND second_device_id = %s
+                  AND second_logged_in_at >= UTC_TIMESTAMP() - INTERVAL 3 HOUR
+                LIMIT 1
+                """,
+                (user_id, device_id),
+            )
+            return cursor.fetchone() is not None
+
+
 def list_login_alerts(connection, user_id: int):
     with connection.cursor() as cursor:
         cursor.execute(
