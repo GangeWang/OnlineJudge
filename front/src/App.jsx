@@ -24,6 +24,36 @@ const postForm = async (url, fields) => {
     return data;
 };
 
+const createDeviceId = () => {
+    if (typeof globalThis.crypto?.randomUUID === "function") {
+        return globalThis.crypto.randomUUID();
+    }
+
+    const bytes = new Uint8Array(16);
+    if (typeof globalThis.crypto?.getRandomValues === "function") {
+        globalThis.crypto.getRandomValues(bytes);
+    } else {
+        for (let index = 0; index < bytes.length; index += 1) {
+            bytes[index] = Math.floor(Math.random() * 256);
+        }
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0"));
+    return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10, 16).join("")}`;
+};
+
+const deviceId = () => {
+    const key = "online-judge-device-id";
+    let value = localStorage.getItem(key);
+    if (!value) {
+        value = createDeviceId();
+        localStorage.setItem(key, value);
+    }
+    // localStorage is retained when the user refreshes the page (F5).
+    return value;
+};
+
 export default function App() {
     const [language, setLanguage] = useState("c");
     const [code, setCode] = useState(defaultCode);
@@ -35,6 +65,7 @@ export default function App() {
     const [currentUser, setCurrentUser] = useState(null);
     const [authMessage, setAuthMessage] = useState("");
     const [submissions, setSubmissions] = useState([]);
+    const [loginAlerts, setLoginAlerts] = useState([]);
 
     useEffect(() => {
         const fetchProblems = async () => {
@@ -65,8 +96,9 @@ export default function App() {
     const handleAuth = async (mode) => {
         setAuthMessage(mode === "register" ? "Creating account..." : "Logging in...");
         try {
-            const data = await postForm(`/api/${mode}`, credentials);
+            const data = await postForm(`/api/${mode}`, mode === "login" ? { ...credentials, device_id: deviceId() } : credentials);
             setCurrentUser(data.user);
+            setLoginAlerts(data.login_alert ? [data.login_alert] : []);
             setAuthMessage(`${mode === "register" ? "註冊" : "登入"}成功：${data.user.username}`);
             await loadSubmissions();
         } catch (error) {
@@ -87,6 +119,7 @@ export default function App() {
                 language,
                 code,
                 problem_id: problemId,
+                device_id: deviceId(),
                 ...credentials,
             });
             setResult(JSON.stringify(data, null, 2));
@@ -124,6 +157,16 @@ export default function App() {
                     </div>
                     {currentUser && <p className="current-user">目前使用者：{currentUser.username}</p>}
                     {authMessage && <p className="auth-message">{authMessage}</p>}
+                    {loginAlerts.length > 0 && (
+                        <section className="login-alert" role="alert">
+                            <strong>異地登入警告</strong>
+                            {loginAlerts.map((alert) => (
+                                <p key={alert.id}>
+                                    三小時內偵測到不同裝置登入：{alert.first_ip_address}（先登入）與 {alert.second_ip_address}（後登入）。
+                                </p>
+                            ))}
+                        </section>
+                    )}
                 </section>
             </header>
 
