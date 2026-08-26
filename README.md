@@ -446,6 +446,43 @@ sudo systemctl reload nginx
 
 若要在正式環境開放 80/443，建議保留「前端同網域 + `/api` 反向代理 + 轉發來源 IP 標頭」的拓樸，避免前後端跨網域造成額外維運與偵錯成本。
 
+### 10.1.1 macOS（Homebrew）Nginx 部署方式
+
+若在 macOS 上使用 Homebrew 安裝 Nginx，可參考以下補充流程：
+
+1. 安裝與啟動：
+
+```bash
+brew install nginx
+brew services start nginx
+```
+
+2. Homebrew Nginx 常見設定根目錄：
+
+* Apple Silicon：`/opt/homebrew/etc/nginx`
+* Intel：`/usr/local/etc/nginx`
+
+3. 建議將本專案設定檔複製到 `servers` 目錄（以 Apple Silicon 為例）：
+
+```bash
+cp /path/to/OnlineJudge/deploy/nginx/oj.conf /opt/homebrew/etc/nginx/servers/oj.conf
+```
+
+4. 依本機實際路徑調整 `oj.conf` 內的 `root`（前端 `front/dist` 絕對路徑）與 `proxy_pass`（後端位址）。
+
+5. 驗證並重載：
+
+```bash
+nginx -t
+brew services restart nginx
+```
+
+6. 驗證網站與 API：
+
+* `http://localhost:8080` 可開啟前端頁面
+* `/api/*` 可正常轉發到後端
+* 後端可收到 `X-Forwarded-For` / `X-Real-IP`
+
 ## 10.2 反作弊機制（補充說明）
 
 目前系統的防作弊核心是「帳號 + 瀏覽器裝置識別碼 + 時間窗口」聯合判定，重點如下：
