@@ -412,4 +412,92 @@ npm run dev
 
 ---
 
+# 10. 補充：Nginx 部署與反作弊機制
+
+## 10.1 使用 Nginx 部署（補充步驟）
+
+可在既有 `deploy/nginx/oj.conf` 基礎上，依下列流程部署：
+
+1. 先建置前端靜態檔：
+
+```bash
+cd front
+npm install
+npm run build
+```
+
+2. 啟動後端服務（例如 `127.0.0.1:8000`）。
+
+3. 將 `deploy/nginx/oj.conf` 內的 `root` 改為你的 `front/dist` 絕對路徑。
+
+4. 將 Nginx 設定檔連結到啟用目錄後重載：
+
+```bash
+sudo ln -sf /path/to/OnlineJudge/deploy/nginx/oj.conf /etc/nginx/conf.d/oj.conf
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+5. 驗證：
+
+* 首頁可正常開啟（SPA 路由可直接刷新）。
+* `/api/*` 會正確轉發至後端。
+* 後端可收到 `X-Forwarded-For` 與 `X-Real-IP`。
+
+若要在正式環境開放 80/443，建議保留「前端同網域 + `/api` 反向代理 + 轉發來源 IP 標頭」的拓樸，避免前後端跨網域造成額外維運與偵錯成本。
+
+### 10.1.1 macOS（Homebrew）Nginx 部署方式
+
+若在 macOS 上使用 Homebrew 安裝 Nginx，可參考以下補充流程：
+
+1. 安裝與啟動：
+
+```bash
+brew install nginx
+brew services start nginx
+```
+
+2. Homebrew Nginx 常見設定根目錄：
+
+* Apple Silicon：`/opt/homebrew/etc/nginx`
+* Intel：`/usr/local/etc/nginx`
+
+3. 建議將本專案設定檔複製到 `servers` 目錄（以 Apple Silicon 為例）：
+
+```bash
+cp /path/to/OnlineJudge/deploy/nginx/oj.conf /opt/homebrew/etc/nginx/servers/oj.conf
+```
+
+4. 依本機實際路徑調整 `oj.conf` 內的 `root`（前端 `front/dist` 絕對路徑）與 `proxy_pass`（後端位址）。
+
+5. 驗證並重載：
+
+```bash
+nginx -t
+brew services restart nginx
+```
+
+6. 驗證網站與 API：
+
+* `http://localhost:8080` 可開啟前端頁面
+* `/api/*` 可正常轉發到後端
+* 後端可收到 `X-Forwarded-For` / `X-Real-IP`
+
+## 10.2 反作弊機制（補充說明）
+
+目前系統的防作弊核心是「帳號 + 瀏覽器裝置識別碼 + 時間窗口」聯合判定，重點如下：
+
+1. 不以前端回傳的任意欄位作為可信依據，來源 IP 以伺服器/代理層觀測值為準。
+2. 三小時內同帳號若出現不同裝置識別碼登入，會觸發異地登入警告並限制後登入端提交。
+3. 三小時內同一裝置識別碼僅允許登入一個帳號，降低共用裝置輪替帳號的規避行為。
+4. 重新整理頁面不會改變同一瀏覽器的裝置識別碼，避免誤判。
+5. 後端日誌保留帳號、IP 與裝置識別碼，提供管理者事後稽核依據。
+
+管理建議：
+
+* 於校內或公司內網部署時，請確保代理有正確傳遞 `X-Forwarded-For` / `X-Real-IP`，否則記錄來源可能全部落在代理節點。
+* 對於共用 NAT 環境（教室、宿舍、辦公室），請以「裝置識別碼差異」為主要告警依據，IP 用於輔助比對。
+
+---
+
 # End
