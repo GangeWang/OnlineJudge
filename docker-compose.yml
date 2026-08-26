@@ -6,7 +6,7 @@ services:
       context: ./backend
     image: onlineoj-backend:latest
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       - HOST_BACKEND_DIR=${HOST_BACKEND_DIR:-${PWD}/backend}
       - MARIADB_HOST=host.docker.internal
@@ -14,9 +14,23 @@ services:
       - MARIADB_USER=onlinejudge
       - MARIADB_PASSWORD=onlinejudge
       - MARIADB_DATABASE=onlinejudge
+      - DOCKER_HOST=tcp://docker-socket-proxy:2375
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - ./backend:/app
+    depends_on:
+      - docker-socket-proxy
+
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      NETWORKS: 1
+      POST: 1
+      INFO: 1
+      VOLUMES: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
 
   sandbox:
     build:

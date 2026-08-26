@@ -2,9 +2,11 @@ from pathlib import Path
 
 import ipaddress
 import logging
+import os
+import secrets
 from uuid import UUID
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from judge import judge_submission
 from pymysql.err import IntegrityError
@@ -12,17 +14,22 @@ from pymysql.err import IntegrityError
 from database import (
     authenticate_user,
     create_user,
+    create_session,
     find_recent_other_user_on_device,
+    get_session,
     init_db,
     is_submission_blocked,
     list_login_alerts_for_user,
     list_submissions,
+    record_submission_attempt,
     record_login,
     save_submission,
 )
 
 app = FastAPI()
 logger = logging.getLogger(__name__)
+SESSION_COOKIE = "oj_session"
+DEVICE_COOKIE = "oj_device"
 
 
 @app.on_event("startup")
@@ -31,7 +38,7 @@ def startup():
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:8080").split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -78,7 +85,7 @@ def list_problems():
 
 
 @app.post("/register")
-def register(username: str = Form(...), password: str = Form(...)):
+def register(request: Request, response: Response, username: str = Form(...), password: str = Form(...)):
     username = username.strip()
     if len(username) < 3 or len(username) > 64:
         raise HTTPException(status_code=400, detail="帳號需為 3 到 64 個字元")
@@ -86,7 +93,10 @@ def register(username: str = Form(...), password: str = Form(...)):
         raise HTTPException(status_code=400, detail="密碼至少需要 6 個字元")
 
     try:
-        return {"user": create_user(username, password)}
+        user = create_user(username, password)
+        device_id = _device_id(request, response)
+        _set_session(response, user["id"], device_id)
+        return {"user": user}
     except IntegrityError:
         raise HTTPException(status_code=409, detail="帳號已存在")
 
@@ -141,24 +151,45 @@ def client_ip(request: Request) -> str:
     return "unknown"
 
 
-def validate_login_device(device_id: str) -> str:
+def _device_id(request: Request, response: Response) -> str:
+    value = request.cookies.get(DEVICE_COOKIE)
     try:
-        return str(UUID(device_id))
+        return str(UUID(value))
     except (TypeError, ValueError, AttributeError):
-        raise HTTPException(status_code=400, detail="無效的裝置識別碼")
+        value = str(UUID(bytes=secrets.token_bytes(16)))
+        response.set_cookie(
+            DEVICE_COOKIE, value, max_age=60 * 60 * 24 * 365,
+            httponly=True, secure=False, samesite="lax",
+        )
+        return value
+
+
+def _set_session(response: Response, user_id: int, device_id: str):
+    token = create_session(user_id, device_id)
+    response.set_cookie(
+        SESSION_COOKIE, token, max_age=60 * 60 * 12,
+        httponly=True, secure=False, samesite="lax",
+    )
+
+
+def authenticated_session(request: Request):
+    session = get_session(request.cookies.get(SESSION_COOKIE))
+    if not session:
+        raise HTTPException(status_code=401, detail="請先登入")
+    return session
 
 
 @app.post("/login")
 def login(
     request: Request,
+    response: Response,
     username: str = Form(...),
     password: str = Form(...),
-    device_id: str = Form(...),
 ):
     user = authenticate_user(username.strip(), password)
     if user is None:
         raise HTTPException(status_code=401, detail="帳號或密碼錯誤")
-    device_id = validate_login_device(device_id)
+    device_id = _device_id(request, response)
     ip = client_ip(request)
     other_user = find_recent_other_user_on_device(user["id"], device_id)
     if other_user:
@@ -186,49 +217,50 @@ def login(
             new_alert["second_ip_address"],
             new_alert["second_device_id"],
         )
+    _set_session(response, user["id"], device_id)
     return {"user": user, "login_alert": new_alert}
 
 
 @app.post("/login-alerts")
-def login_alerts(username: str = Form(...), password: str = Form(...)):
-    user = authenticate_user(username.strip(), password)
-    if user is None:
-        raise HTTPException(status_code=401, detail="帳號或密碼錯誤")
-    return list_login_alerts_for_user(user["id"])
+def login_alerts(request: Request):
+    session = authenticated_session(request)
+    return list_login_alerts_for_user(session["user_id"])
 
 
 @app.post("/submit")
 def submit(
+    request: Request,
     language: str = Form(...),
     code: str = Form(...),
     problem_id: str = Form(...),
-    username: str = Form(...),
-    password: str = Form(...),
-    device_id: str = Form(...),
 ):
-    user = authenticate_user(username.strip(), password)
-    if user is None:
-        raise HTTPException(status_code=401, detail="請先登入後再提交")
-    if is_submission_blocked(user["id"], validate_login_device(device_id)):
+    session = authenticated_session(request)
+    if is_submission_blocked(session["user_id"]):
         raise HTTPException(
             status_code=403,
-            detail="偵測到三小時內有異地登入，後登入的裝置暫時無法提交答案",
+            detail="偵測到三小時內有異地登入，暫時無法提交答案",
+        )
+    retry_after = record_submission_attempt(session["user_id"], problem_id)
+    if retry_after:
+        raise HTTPException(
+            status_code=429,
+            detail=f"提交過於頻繁，請 {retry_after} 秒後再試",
+            headers={"Retry-After": str(retry_after)},
         )
 
     result = judge_submission(language, code, problem_id)
     submission_id = save_submission(
-        user["id"],
-        user["username"],
+        session["user_id"],
+        session["username"],
         problem_id,
         language,
-        result
+        result,
+        code,
     )
     return {**result, "submission_id": submission_id}
 
 
 @app.post("/submissions")
-def submissions(username: str = Form(...), password: str = Form(...)):
-    user = authenticate_user(username.strip(), password)
-    if user is None:
-        raise HTTPException(status_code=401, detail="帳號或密碼錯誤")
-    return list_submissions(user["id"])
+def submissions(request: Request):
+    session = authenticated_session(request)
+    return list_submissions(session["user_id"])

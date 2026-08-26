@@ -16,42 +16,12 @@ const postForm = async (url, fields) => {
     const formData = new FormData();
     Object.entries(fields).forEach(([key, value]) => formData.append(key, value));
 
-    const res = await fetch(url, { method: "POST", body: formData });
+    const res = await fetch(url, { method: "POST", body: formData, credentials: "include" });
     const data = await res.json();
     if (!res.ok) {
         throw new Error(data.detail || "Request failed");
     }
     return data;
-};
-
-const createDeviceId = () => {
-    if (typeof globalThis.crypto?.randomUUID === "function") {
-        return globalThis.crypto.randomUUID();
-    }
-
-    const bytes = new Uint8Array(16);
-    if (typeof globalThis.crypto?.getRandomValues === "function") {
-        globalThis.crypto.getRandomValues(bytes);
-    } else {
-        for (let index = 0; index < bytes.length; index += 1) {
-            bytes[index] = Math.floor(Math.random() * 256);
-        }
-    }
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0"));
-    return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10, 16).join("")}`;
-};
-
-const deviceId = () => {
-    const key = "online-judge-device-id";
-    let value = localStorage.getItem(key);
-    if (!value) {
-        value = createDeviceId();
-        localStorage.setItem(key, value);
-    }
-    // localStorage is retained when the user refreshes the page (F5).
-    return value;
 };
 
 export default function App() {
@@ -85,22 +55,21 @@ export default function App() {
         [problems, problemId],
     );
 
-    const credentials = { username, password };
-
     const loadSubmissions = async () => {
-        if (!username || !password) return;
-        const data = await postForm("/api/submissions", credentials);
+        if (!currentUser) return;
+        const data = await postForm("/api/submissions", {});
         setSubmissions(data);
     };
 
     const handleAuth = async (mode) => {
         setAuthMessage(mode === "register" ? "Creating account..." : "Logging in...");
         try {
-            const data = await postForm(`/api/${mode}`, mode === "login" ? { ...credentials, device_id: deviceId() } : credentials);
+            const data = await postForm(`/api/${mode}`, { username, password });
             setCurrentUser(data.user);
             setLoginAlerts(data.login_alert ? [data.login_alert] : []);
             setAuthMessage(`${mode === "register" ? "註冊" : "登入"}成功：${data.user.username}`);
-            await loadSubmissions();
+            const history = await postForm("/api/submissions", {});
+            setSubmissions(history);
         } catch (error) {
             setAuthMessage(error.message);
         }
@@ -119,8 +88,6 @@ export default function App() {
                 language,
                 code,
                 problem_id: problemId,
-                device_id: deviceId(),
-                ...credentials,
             });
             setResult(JSON.stringify(data, null, 2));
             await loadSubmissions();

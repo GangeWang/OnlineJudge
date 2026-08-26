@@ -130,16 +130,19 @@ def run_tests(run_cmd, testcases, work_dir):
             stdin_text = f.read()
         expected = open(outp).read().strip()
 
+        case_dir = os.path.join(work_dir, f"case-{i}")
+        os.makedirs(case_dir, exist_ok=True)
+        for executable in run_cmd:
+            if executable.startswith("./"):
+                shutil.copy2(os.path.join(work_dir, executable[2:]), os.path.join(case_dir, executable[2:]))
         try:
-            res = run_in_sandbox(work_dir, run_cmd, stdin_text)
+            res = run_in_sandbox(case_dir, run_cmd, stdin_text)
         except subprocess.TimeoutExpired:
             return {"status": "TLE", "case": i}
 
-        if res.returncode == 137:
-            return {"status": "MLE", "case": i}
         if res.returncode != 0:
             return {"status": "RE", "case": i, "error": res.stderr}
         if res.stdout.strip() != expected:
-            return {"status": "WA", "case": i, "expected": expected, "got": res.stdout.strip()}
+            return {"status": "WA", "case": i}
 
     return {"status": "AC"}

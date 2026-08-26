@@ -3,3 +3,4 @@ uvicorn
 python-multipart
 
 pymysql
+argon2-cffi
