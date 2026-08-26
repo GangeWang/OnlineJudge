@@ -20,6 +20,7 @@ OnlineJudge/
 │  ├─ database.py          # MariaDB 連線與資料操作
 │  ├─ requirements.txt     # 後端套件
 │  └─ problems/            # 題庫目錄（每題一個資料夾）
+├─ deploy/nginx/           # 反向代理設定範例
 ├─ sandbox/                # 沙箱映像相關檔案
 └─ docker-compose.yml      # 後端容器啟動設定
 ```
@@ -117,6 +118,8 @@ npm install
 ```bash
 npm run dev
 ```
+
+開發模式下，前端會透過 Vite `/api` 代理呼叫後端，並轉發 `X-Forwarded-*` 標頭供後端辨識來源 IP。
 
 其他可用指令：
 
@@ -296,6 +299,34 @@ http://localhost:8000
 2. 前端 API Base URL 是否設定正確
 
 3. 確認 CORS 設定
+
+4. 若前端不是直連後端，而是透過代理（Vite/Nginx），請確認有轉發：
+
+```text
+X-Forwarded-For
+X-Real-IP
+```
+
+可參考：
+
+```text
+deploy/nginx/oj.conf
+```
+
+---
+
+## Q4：同一教室多台電腦，後端看到的 IP 還是同一個
+
+最常見原因是前端/API 都先經過同一台代理，後端只看到代理來源。
+
+建議部署方式：
+
+1. 對外只開 Nginx（80/443）
+2. 前端走同網域 `/api/*`
+3. Nginx 反向代理到後端（例如 `127.0.0.1:8000`）
+4. Nginx 必須轉發 `X-Forwarded-For` / `X-Real-IP`
+
+> 不要讓瀏覽器自己上傳 `ip` 欄位作為判定依據，該值可被偽造；IP 應以伺服器與代理層觀測值為準。
 
 ---
 
