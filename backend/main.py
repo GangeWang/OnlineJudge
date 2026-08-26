@@ -37,23 +37,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-PROBLEM_INFO = {
-    "1001": {
-        "title": "infix to postfix 四則運算",
-        "description": "輸入中敘式，輸出四則運算後的答案",
-    },
-    "1002": {
-        "title": "A + B Problem",
-        "description": "讀入兩個整數 a 與 b，輸出 a + b。",
-    }
-}
-
-
 def build_problem_item(problem_id: str, problem_dir: Path):
-    info = PROBLEM_INFO.get(
-        problem_id,
-        {"title": f"Problem {problem_id}", "description": "尚無題目敘述。"},
-    )
+    title_file = problem_dir / "title.txt"
+    description_file = problem_dir / "description.txt"
+
+    title = title_file.read_text(encoding="utf-8").strip() if title_file.exists() else f"Problem {problem_id}"
+    description = description_file.read_text(encoding="utf-8").strip() if description_file.exists() else "尚無題目敘述。"
 
     sample_input_file = problem_dir / "input1.txt"
     sample_output_file = problem_dir / "output1.txt"
@@ -62,8 +51,8 @@ def build_problem_item(problem_id: str, problem_dir: Path):
 
     return {
         "id": problem_id,
-        "title": info["title"],
-        "description": info["description"],
+        "title": title,
+        "description": description,
         "sample_input": sample_input,
         "sample_output": sample_output,
     }
