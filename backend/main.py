@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import ipaddress
 import logging
 from uuid import UUID
 
@@ -101,9 +102,54 @@ def register(username: str = Form(...), password: str = Form(...)):
         raise HTTPException(status_code=409, detail="帳號已存在")
 
 
+def _parse_valid_ip(value: str) -> str | None:
+    candidate = (value or "").strip()
+    if not candidate:
+        return None
+    if candidate.startswith("[") and "]" in candidate:
+        candidate = candidate[1:candidate.index("]")]
+    try:
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        return None
+
+
+def _forwarded_ip_candidates(request: Request) -> list[str]:
+    candidates: list[str] = []
+    x_forwarded_for = request.headers.get("x-forwarded-for", "")
+    if x_forwarded_for:
+        for item in x_forwarded_for.split(","):
+            ip = _parse_valid_ip(item)
+            if ip:
+                candidates.append(ip)
+
+    x_real_ip = _parse_valid_ip(request.headers.get("x-real-ip", ""))
+    if x_real_ip:
+        candidates.append(x_real_ip)
+    return candidates
+
+
 def client_ip(request: Request) -> str:
-    """Use the connection IP; configure a trusted proxy to preserve client IPs."""
-    return request.client.host if request.client else "unknown"
+    """Prefer private LAN client IPs from trusted internal proxies."""
+    direct_ip = _parse_valid_ip(request.client.host if request.client else "")
+    forwarded_candidates = _forwarded_ip_candidates(request)
+    if direct_ip:
+        direct_ip_obj = ipaddress.ip_address(direct_ip)
+        if direct_ip_obj.is_private or direct_ip_obj.is_loopback:
+            for forwarded_ip in forwarded_candidates:
+                forwarded_obj = ipaddress.ip_address(forwarded_ip)
+                if (
+                    forwarded_obj.is_private
+                    or forwarded_obj.is_loopback
+                    or forwarded_obj.is_link_local
+                ):
+                    return forwarded_ip
+            if forwarded_candidates:
+                return forwarded_candidates[0]
+        return direct_ip
+    if forwarded_candidates:
+        return forwarded_candidates[0]
+    return "unknown"
 
 
 def validate_login_device(device_id: str) -> str:
