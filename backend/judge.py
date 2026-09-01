@@ -3,6 +3,8 @@ import uuid
 import subprocess
 import shutil
 import glob
+import re
+from pathlib import Path
 
 BASE_DIR = "/app"
 HOST_BASE_DIR = os.getenv("HOST_BACKEND_DIR", BASE_DIR)
@@ -10,6 +12,16 @@ TEMP_DIR = os.path.join(BASE_DIR, "temp")
 PROBLEM_DIR = os.path.join(BASE_DIR, "problems")
 TIME_LIMIT = 2
 JUDGE_IMAGE = os.getenv("JUDGE_IMAGE", "onlineoj-sandbox:latest")
+PROBLEM_ROOT = Path(PROBLEM_DIR).resolve()
+
+
+def resolve_problem_path(problem_id):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", problem_id or ""):
+        return None
+    if not PROBLEM_ROOT.exists():
+        return None
+    problem_paths = {path.name: path for path in PROBLEM_ROOT.iterdir() if path.is_dir()}
+    return problem_paths.get(problem_id)
 
 
 def judge_submission(language, code, problem_id):
@@ -20,9 +32,11 @@ def judge_submission(language, code, problem_id):
     os.chmod(work_dir, 0o777)
 
     try:
-        problem_path = os.path.join(PROBLEM_DIR, problem_id)
+        problem_path = resolve_problem_path(problem_id)
+        if problem_path is None:
+            return {"status": "ERROR", "message": "Invalid problem_id"}
 
-        input_files = sorted(glob.glob(os.path.join(problem_path, "input*.txt")))
+        input_files = sorted(glob.glob(str(problem_path / "input*.txt")))
         if not input_files:
             return {"status": "ERROR", "message": "No testcases"}
 
