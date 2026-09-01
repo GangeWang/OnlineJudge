@@ -3,6 +3,7 @@ from pathlib import Path
 import ipaddress
 import logging
 import os
+import re
 import secrets
 from uuid import UUID
 
@@ -63,6 +64,14 @@ def build_problem_item(problem_id: str, problem_dir: Path):
         "sample_input": sample_input,
         "sample_output": sample_output,
     }
+
+
+def is_valid_problem_id(problem_id: str) -> bool:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", problem_id or ""):
+        return False
+    problems_root = (Path(__file__).resolve().parent / "problems").resolve()
+    candidate = (problems_root / problem_id).resolve()
+    return candidate.parent == problems_root and candidate.is_dir()
 
 
 @app.get("/")
@@ -235,7 +244,10 @@ def submit(
     problem_id: str = Form(...),
 ):
     session = authenticated_session(request)
-    if is_submission_blocked(session["user_id"]):
+    problem_id = problem_id.strip()
+    if not is_valid_problem_id(problem_id):
+        raise HTTPException(status_code=400, detail="無效的題號")
+    if is_submission_blocked(session["user_id"], session["device_id"]):
         raise HTTPException(
             status_code=403,
             detail="偵測到三小時內有異地登入，暫時無法提交答案",

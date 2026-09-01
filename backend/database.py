@@ -203,9 +203,9 @@ def create_session(user_id: int, device_id: str, lifetime_hours: int = 12):
             cursor.execute(
                 """
                 INSERT INTO sessions (token_hash, user_id, device_id, expires_at)
-                VALUES (%s, %s, %s, UTC_TIMESTAMP() + INTERVAL 20 HOUR)
+                VALUES (%s, %s, %s, DATE_ADD(CURRENT_TIMESTAMP(), INTERVAL %s HOUR))
                 """,
-                (hash_session_token(token), user_id, device_id),
+                (hash_session_token(token), user_id, device_id, lifetime_hours),
             )
     return token
 
@@ -221,7 +221,7 @@ def get_session(token: str):
                 FROM sessions
                 JOIN users ON users.id = sessions.user_id
                 WHERE sessions.token_hash = %s
-                  AND sessions.expires_at > UTC_TIMESTAMP() + INTERVAL 8 HOUR
+                  AND sessions.expires_at > CURRENT_TIMESTAMP()
                 """,
                 (hash_session_token(token),),
             )
@@ -237,12 +237,12 @@ def record_submission_attempt(user_id: int, problem_id: str):
                     TIMESTAMPDIFF(
                         SECOND,
                         MAX(CASE WHEN problem_id = %s THEN attempted_at END),
-                        UTC_TIMESTAMP() + INTERVAL 8 HOUR
+                        CURRENT_TIMESTAMP()
                     ) AS problem_elapsed,
-                    TIMESTAMPDIFF(SECOND, MAX(attempted_at), UTC_TIMESTAMP() + INTERVAL 8 HOUR) AS global_elapsed
+                    TIMESTAMPDIFF(SECOND, MAX(attempted_at), CURRENT_TIMESTAMP()) AS global_elapsed
                 FROM submission_attempts
                 WHERE user_id = %s
-                  AND attempted_at >= UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 1 HOUR
+                  AND attempted_at >= CURRENT_TIMESTAMP() - INTERVAL 1 HOUR
                 """,
                 (problem_id, user_id),
             )
@@ -270,7 +270,7 @@ def record_login(user_id: int, ip_address: str, device_id: str):
                 FROM login_events
                 WHERE user_id = %s
                   AND device_id = %s
-                  AND logged_in_at >= UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 3 HOUR
+                  AND logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
                 LIMIT 1
                 """,
                 (user_id, device_id),
@@ -291,7 +291,7 @@ def record_login(user_id: int, ip_address: str, device_id: str):
                 SELECT ip_address, device_id, logged_in_at
                 FROM login_events
                 WHERE user_id = %s
-                  AND logged_in_at >= UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 3 HOUR
+                  AND logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
                   AND device_id <> %s
                 ORDER BY logged_in_at DESC
                 LIMIT 1
@@ -335,8 +335,8 @@ def list_login_alerts_for_user(user_id: int):
         return list_login_alerts(connection, user_id)
 
 
-def is_submission_blocked(user_id: int) -> bool:
-    """Block all submissions while a cross-device alert is active."""
+def is_submission_blocked(user_id: int, device_id: str) -> bool:
+    """Block submissions on the later-login device while a cross-device alert is active."""
     with get_connection() as connection:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -344,10 +344,11 @@ def is_submission_blocked(user_id: int) -> bool:
                 SELECT 1
                 FROM login_security_alerts
                 WHERE user_id = %s
-                  AND second_logged_in_at >= UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 3 HOUR
+                  AND second_device_id = %s
+                  AND second_logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
                 LIMIT 1
                 """,
-                (user_id,),
+                (user_id, device_id),
             )
             return cursor.fetchone() is not None
 
@@ -363,7 +364,7 @@ def find_recent_other_user_on_device(user_id: int, device_id: str):
                 JOIN users ON users.id = login_events.user_id
                 WHERE login_events.device_id = %s
                   AND login_events.user_id <> %s
-                  AND login_events.logged_in_at >= UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 3 HOUR
+                  AND login_events.logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
                 ORDER BY login_events.logged_in_at DESC
                 LIMIT 1
                 """,
@@ -380,7 +381,7 @@ def list_login_alerts(connection, user_id: int):
                    second_ip_address, second_device_id, second_logged_in_at
             FROM login_security_alerts
             WHERE user_id = %s
-              AND second_logged_in_at >= UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 3 HOUR
+              AND second_logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
             ORDER BY second_logged_in_at DESC, id DESC
             """,
             (user_id,),
