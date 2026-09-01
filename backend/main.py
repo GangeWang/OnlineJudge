@@ -69,9 +69,10 @@ def build_problem_item(problem_id: str, problem_dir: Path):
 def is_valid_problem_id(problem_id: str) -> bool:
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", problem_id or ""):
         return False
-    problems_root = (Path(__file__).resolve().parent / "problems").resolve()
-    candidate = (problems_root / problem_id).resolve()
-    return candidate.parent == problems_root and candidate.is_dir()
+    problems_root = Path(__file__).resolve().parent / "problems"
+    if not problems_root.exists():
+        return False
+    return any(problem_dir.name == problem_id for problem_dir in problems_root.iterdir() if problem_dir.is_dir())
 
 
 @app.get("/")

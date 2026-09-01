@@ -18,10 +18,10 @@ PROBLEM_ROOT = Path(PROBLEM_DIR).resolve()
 def resolve_problem_path(problem_id):
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", problem_id or ""):
         return None
-    candidate = (PROBLEM_ROOT / problem_id).resolve()
-    if candidate.parent != PROBLEM_ROOT or not candidate.is_dir():
+    if not PROBLEM_ROOT.exists():
         return None
-    return candidate
+    problem_paths = {path.name: path for path in PROBLEM_ROOT.iterdir() if path.is_dir()}
+    return problem_paths.get(problem_id)
 
 
 def judge_submission(language, code, problem_id):
