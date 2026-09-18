@@ -12,11 +12,48 @@ int main() {
 }
 `;
 
+const getClientFingerprint = () => {
+    try {
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+            ctx.textBaseline = "top";
+            ctx.font = "14px 'Arial'";
+            ctx.fillStyle = "#f60";
+            ctx.fillRect(125, 1, 62, 20);
+            ctx.fillStyle = "#069";
+            ctx.fillText("OJ-AntiCheat", 2, 15);
+            ctx.fillStyle = "rgba(102, 204, 0, 0.7)";
+            ctx.fillText("OJ-AntiCheat", 4, 17);
+        }
+        const dataUrl = canvas.toDataURL ? canvas.toDataURL() : "";
+        const screenInfo = typeof screen !== "undefined" ? `${screen.width}x${screen.height}x${screen.colorDepth}` : "";
+        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+        const cores = navigator.hardwareConcurrency || "";
+        const raw = `${dataUrl}|${screenInfo}|${tz}|${cores}`;
+        let hash = 0;
+        for (let i = 0; i < raw.length; i++) {
+            hash = ((hash << 5) - hash) + raw.charCodeAt(i);
+            hash |= 0;
+        }
+        return Math.abs(hash).toString(16);
+    } catch {
+        return "";
+    }
+};
+
 const postForm = async (url, fields) => {
     const formData = new FormData();
     Object.entries(fields).forEach(([key, value]) => formData.append(key, value));
 
-    const res = await fetch(url, { method: "POST", body: formData, credentials: "include" });
+    const res = await fetch(url, {
+        method: "POST",
+        body: formData,
+        credentials: "include",
+        headers: {
+            "X-Client-Fingerprint": getClientFingerprint(),
+        },
+    });
     const data = await res.json();
     if (!res.ok) {
         throw new Error(data.detail || "Request failed");

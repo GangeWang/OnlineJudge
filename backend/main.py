@@ -1,5 +1,7 @@
 from pathlib import Path
 from contextlib import asynccontextmanager
+import hashlib
+import hmac
 import ipaddress
 import logging
 import os
@@ -95,6 +97,43 @@ def list_problems():
 
 
 
+DEVICE_SECRET = os.getenv("DEVICE_SECRET", "oj-secret-device-key-2026")
+
+
+def _sign_device_id(raw_uuid: str) -> str:
+    sig = hmac.new(DEVICE_SECRET.encode("utf-8"), raw_uuid.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+    return f"{raw_uuid}.{sig}"
+
+
+def _verify_device_id(signed_value: str | None) -> str | None:
+    if not signed_value or "." not in signed_value:
+        return None
+    parts = signed_value.split(".", 1)
+    if len(parts) != 2:
+        return None
+    raw_uuid, sig = parts
+    try:
+        UUID(raw_uuid)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    expected = hmac.new(DEVICE_SECRET.encode("utf-8"), raw_uuid.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+    if hmac.compare_digest(sig, expected):
+        return raw_uuid
+    return None
+
+
+def _browser_fingerprint(request: Request) -> str:
+    """Deterministic SHA-256 fingerprint generated from browser headers and client hardware fingerprint."""
+    ua = request.headers.get("user-agent", "")
+    lang = request.headers.get("accept-language", "")
+    sec_ch_ua = request.headers.get("sec-ch-ua", "")
+    sec_platform = request.headers.get("sec-ch-ua-platform", "")
+    encoding = request.headers.get("accept-encoding", "")
+    client_fp = request.headers.get("x-client-fingerprint", "")
+    raw = f"{ua}|{lang}|{sec_ch_ua}|{sec_platform}|{encoding}|{client_fp}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 @app.post("/register")
 def register(request: Request, response: Response, username: str = Form(...), password: str = Form(...)):
     username = username.strip()
@@ -106,7 +145,8 @@ def register(request: Request, response: Response, username: str = Form(...), pa
     try:
         user = create_user(username, password)
         device_id = _device_id(request, response)
-        _set_session(response, user["id"], device_id)
+        fingerprint = _browser_fingerprint(request)
+        _set_session(response, user["id"], device_id, fingerprint)
         return {"user": user}
     except IntegrityError:
         raise HTTPException(status_code=409, detail="帳號已存在")
@@ -124,59 +164,56 @@ def _parse_valid_ip(value: str) -> str | None:
         return None
 
 
-def _forwarded_ip_candidates(request: Request) -> list[str]:
-    candidates: list[str] = []
-    x_forwarded_for = request.headers.get("x-forwarded-for", "")
-    if x_forwarded_for:
-        for item in x_forwarded_for.split(","):
-            ip = _parse_valid_ip(item)
-            if ip:
-                candidates.append(ip)
-
-    x_real_ip = _parse_valid_ip(request.headers.get("x-real-ip", ""))
-    if x_real_ip:
-        candidates.append(x_real_ip)
-    return candidates
-
-
 def client_ip(request: Request) -> str:
-    """Prefer private LAN client IPs from trusted internal proxies."""
+    """
+    Extract client IP securely.
+    Only trust forwarded headers if the direct connection comes from a trusted internal proxy
+    (loopback or private network). When trusted, use X-Real-IP set by Nginx ($remote_addr).
+    Does not trust spoofable client-supplied X-Forwarded-For headers.
+    """
     direct_ip = _parse_valid_ip(request.client.host if request.client else "")
-    forwarded_candidates = _forwarded_ip_candidates(request)
     if direct_ip:
         direct_ip_obj = ipaddress.ip_address(direct_ip)
-        if direct_ip_obj.is_private or direct_ip_obj.is_loopback:
-            for forwarded_ip in forwarded_candidates:
-                forwarded_obj = ipaddress.ip_address(forwarded_ip)
-                if (
-                    forwarded_obj.is_private
-                    or forwarded_obj.is_loopback
-                    or forwarded_obj.is_link_local
-                ):
-                    return forwarded_ip
-            if forwarded_candidates:
-                return forwarded_candidates[0]
+        if direct_ip_obj.is_loopback or direct_ip_obj.is_private:
+            x_real_ip = _parse_valid_ip(request.headers.get("x-real-ip", ""))
+            if x_real_ip:
+                return x_real_ip
+            x_forwarded_for = request.headers.get("x-forwarded-for", "")
+            if x_forwarded_for:
+                for item in x_forwarded_for.split(","):
+                    ip = _parse_valid_ip(item)
+                    if ip:
+                        return ip
         return direct_ip
-    if forwarded_candidates:
-        return forwarded_candidates[0]
     return "unknown"
 
 
 def _device_id(request: Request, response: Response) -> str:
-    value = request.cookies.get(DEVICE_COOKIE)
-    try:
-        return str(UUID(value))
-    except (TypeError, ValueError, AttributeError):
-        value = str(UUID(bytes=secrets.token_bytes(16)))
-        response.set_cookie(
-            DEVICE_COOKIE, value, max_age=60 * 60 * 24 * 365,
-            httponly=True, secure=False, samesite="lax",
-        )
-        return value
+    cookie_val = request.cookies.get(DEVICE_COOKIE)
+    valid_uuid = _verify_device_id(cookie_val)
+    if valid_uuid:
+        return valid_uuid
+    if cookie_val:
+        try:
+            valid_uuid = str(UUID(cookie_val))
+            response.set_cookie(
+                DEVICE_COOKIE, _sign_device_id(valid_uuid), max_age=60 * 60 * 24 * 365,
+                httponly=True, secure=False, samesite="lax",
+            )
+            return valid_uuid
+        except (TypeError, ValueError, AttributeError):
+            pass
+
+    new_uuid = str(UUID(bytes=secrets.token_bytes(16)))
+    response.set_cookie(
+        DEVICE_COOKIE, _sign_device_id(new_uuid), max_age=60 * 60 * 24 * 365,
+        httponly=True, secure=False, samesite="lax",
+    )
+    return new_uuid
 
 
-def _set_session(response: Response, user_id: int, device_id: str):
-    token = create_session(user_id, device_id)
+def _set_session(response: Response, user_id: int, device_id: str, browser_fingerprint: str = ""):
+    token = create_session(user_id, device_id, browser_fingerprint)
     response.set_cookie(
         SESSION_COOKIE, token, max_age=60 * 60 * 12,
         httponly=True, secure=False, samesite="lax",
@@ -202,33 +239,37 @@ def login(
         raise HTTPException(status_code=401, detail="帳號或密碼錯誤")
     device_id = _device_id(request, response)
     ip = client_ip(request)
-    other_user = find_recent_other_user_on_device(user["id"], device_id)
+    fingerprint = _browser_fingerprint(request)
+    other_user = find_recent_other_user_on_device(user["id"], device_id, ip, fingerprint)
     if other_user:
         logger.warning(
             "Multiple-account login blocked username=%s user_id=%s ip=%s "
-            "browser_device_id=%s previous_username=%s previous_user_id=%s",
+            "browser_device_id=%s browser_fingerprint=%s previous_username=%s previous_user_id=%s",
             user["username"],
             user["id"],
             ip,
             device_id,
+            fingerprint,
             other_user["username"],
             other_user["id"],
         )
         raise HTTPException(status_code=403, detail="此裝置三小時內已登入其他帳號，暫時無法登入")
-    _, new_alert = record_login(user["id"], ip, device_id)
+    _, new_alert = record_login(user["id"], ip, device_id, fingerprint)
     if new_alert:
         logger.warning(
             "Cross-device login warning username=%s user_id=%s "
-            "first_ip=%s first_browser_device_id=%s "
-            "attempted_ip=%s attempted_browser_device_id=%s",
+            "first_ip=%s first_browser_device_id=%s first_browser_fp=%s "
+            "attempted_ip=%s attempted_browser_device_id=%s attempted_browser_fp=%s",
             user["username"],
             user["id"],
             new_alert["first_ip_address"],
             new_alert["first_device_id"],
+            new_alert.get("first_browser_fp", ""),
             new_alert["second_ip_address"],
             new_alert["second_device_id"],
+            new_alert.get("second_browser_fp", ""),
         )
-    _set_session(response, user["id"], device_id)
+    _set_session(response, user["id"], device_id, fingerprint)
     return {"user": user, "login_alert": new_alert}
 
 
@@ -249,7 +290,14 @@ def submit(
     problem_id = problem_id.strip()
     if not is_valid_problem_id(problem_id):
         raise HTTPException(status_code=400, detail="無效的題號")
-    if is_submission_blocked(session["user_id"], session["device_id"]):
+    ip = client_ip(request)
+    fingerprint = _browser_fingerprint(request)
+    if is_submission_blocked(
+        session["user_id"],
+        session.get("device_id", ""),
+        ip,
+        session.get("browser_fingerprint") or fingerprint,
+    ):
         raise HTTPException(
             status_code=403,
             detail="偵測到三小時內有異地登入，暫時無法提交答案",
