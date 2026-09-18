@@ -1,5 +1,5 @@
 from pathlib import Path
-
+from contextlib import asynccontextmanager
 import ipaddress
 import logging
 import os
@@ -27,19 +27,20 @@ from database import (
     save_submission,
 )
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+
+app = FastAPI(lifespan=lifespan)
 logger = logging.getLogger(__name__)
 SESSION_COOKIE = "oj_session"
 DEVICE_COOKIE = "oj_device"
 
-
-@app.on_event("startup")
-def startup():
-    init_db()
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:8080").split(","),
+    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:80").split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
