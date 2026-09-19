@@ -51,6 +51,9 @@ OnlineJudge/
 | `MARIADB_USER`     | 資料庫使用者            | `onlinejudge`             |
 | `MARIADB_PASSWORD` | 資料庫密碼             | `onlinejudge`             |
 | `MARIADB_DATABASE` | 資料庫名稱             | `onlinejudge`             |
+| `DEVICE_SECRET`    | 裝置 Cookie 的 HMAC 密鑰（至少 32 bytes） | **必填，無預設值** |
+| `COOKIE_SECURE`    | 是否只透過 HTTPS 傳送 Cookie | `true` |
+| `TRUSTED_PROXY_CIDRS` | 可提供 `X-Real-IP` 的可信代理 CIDR（逗號分隔） | `127.0.0.0/8,::1/128` |
 
 目前 `docker-compose.yml` 內 `backend` 服務預設：
 
@@ -62,7 +65,10 @@ MARIADB_PORT=3306
 MARIADB_USER=onlinejudge
 MARIADB_PASSWORD=onlinejudge
 MARIADB_DATABASE=onlinejudge
+DEVICE_SECRET=<至少 32 bytes 的隨機密鑰>
 ```
+
+可使用 `openssl rand -hex 32` 產生 `DEVICE_SECRET`。請勿提交此密鑰，且所有後端實例必須使用相同值。若目前只使用範例中的 HTTP Nginx，需明確設定 `COOKIE_SECURE=false`；啟用 TLS 後應改回 `true`。
 
 > 若你的環境沒有 `PWD`，請手動設定 `HOST_BACKEND_DIR` 為實際的 backend 絕對路徑，避免判題時 Docker 掛載失敗。
 
@@ -383,15 +389,9 @@ npm run dev
 
 異地登入提示會在後登入裝置的重新登入或 F5 後持續顯示至三小時窗口結束；先登入裝置不會顯示該提示。為避免多人共用帳號規避偵測，同一個瀏覽器裝置識別碼在三小時內也只能登入一個帳號；登入第二個帳號會被後端拒絕並記錄在日誌中。
 
-瀏覽器基於安全與隱私限制，網頁無法讀取使用者網卡的真實 MAC 位址。因此此功能以每個瀏覽器安裝所產生並保存的隨機裝置識別碼取代 MAC 位址；它不會蒐集真實 MAC 位址。
+瀏覽器基於安全與隱私限制，網頁無法讀取使用者網卡的真實 MAC 位址。因此後端會產生隨機 UUID、以 HMAC 簽章後保存於 HttpOnly Cookie；它不是實體硬體身分，也不能防止使用者清除 Cookie。每次偵測到異地登入時，後端日誌會輸出帳號、兩端 IP、裝置識別碼與輔助用的瀏覽器指紋，方便管理者追查。
 
-裝置識別碼會優先使用 `crypto.randomUUID()` 產生；舊版瀏覽器若未提供此 API，會改用相容的 UUID v4 產生流程，因此不會因 `crypto.randomUUID is not a function` 而無法登入。
-
-每次偵測到異地登入時，後端日誌會輸出帳號、先登入與嘗試登入的 IP，以及兩端的 `browser_device_id`，方便管理者追查。`browser_device_id` 是瀏覽器裝置識別碼，不是實體網卡 MAC 位址。
-
-同一瀏覽器按 F5 時，`localStorage` 內的裝置識別碼不會改變；後端也會忽略三小時內已看過的相同裝置識別碼，因此重新整理不會被判定為異地登入或顯示異地登入警告。
-
-若系統部署在內網且前方有反向代理，後端會優先讀取 `X-Forwarded-For` / `X-Real-IP` 內的私有網段 IP（例如 `192.168.x.x`、`10.x.x.x`），以便記錄區域網路來源；若沒有這些標頭，則退回連線來源 IP。
+只有直接連線來源符合 `TRUSTED_PROXY_CIDRS` 時，後端才採用代理覆寫的 `X-Real-IP`；其他連線所帶的來源 IP 標頭一律忽略。範例 Nginx 會以 `$remote_addr` 覆寫該標頭，避免沿用客戶端自行提供的值。
 * 題目列表
 * 提交程式
 * 判題結果
@@ -491,12 +491,14 @@ brew services restart nginx
 2. 三小時內同帳號若出現不同裝置識別碼登入，會觸發異地登入警告並限制後登入端提交。
 3. 三小時內同一裝置識別碼僅允許登入一個帳號，降低共用裝置輪替帳號的規避行為。
 4. 重新整理頁面不會改變同一瀏覽器的裝置識別碼，避免誤判。
-5. 後端日誌保留帳號、IP 與裝置識別碼，提供管理者事後稽核依據。
+5. 裝置 Cookie 由後端以部署專用密鑰簽章；無效或舊版未簽章 Cookie 會被替換，而不會由伺服器代為簽章。
+6. 後端日誌保留帳號、IP 與裝置識別碼，提供管理者事後稽核依據。
 
 管理建議：
 
-* 於校內或公司內網部署時，請確保代理有正確傳遞 `X-Forwarded-For` / `X-Real-IP`，否則記錄來源可能全部落在代理節點。
+* 於校內或公司內網部署時，請將代理實際來源位址（建議精確 `/32` 或 `/128`）加入 `TRUSTED_PROXY_CIDRS`，並確保代理覆寫 `X-Real-IP`。不要把整個私人網段視為可信代理，否則能直接連到後端的內網用戶可偽造來源 IP。
 * 對於共用 NAT 環境（教室、宿舍、辦公室），請以「裝置識別碼差異」為主要告警依據，IP 用於輔助比對。
+* 瀏覽器指紋與所有前端標頭都可由惡意客戶端修改，只能作為風險訊號，不能視為可信的硬體身分。若考試需要強身分綁定，應另行採用受管理裝置憑證或 WebAuthn 等機制。
 
 ---
 

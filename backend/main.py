@@ -32,6 +32,8 @@ from database import (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Fail closed at startup instead of silently signing cookies with a public key.
+    _device_secret()
     init_db()
     yield
 
@@ -97,11 +99,25 @@ def list_problems():
 
 
 
-DEVICE_SECRET = os.getenv("DEVICE_SECRET", "oj-secret-device-key-2026")
+MIN_DEVICE_SECRET_BYTES = 32
+
+
+def _device_secret() -> bytes:
+    """Return the deployment secret used to authenticate device cookies."""
+    value = os.getenv("DEVICE_SECRET", "").encode("utf-8")
+    if len(value) < MIN_DEVICE_SECRET_BYTES:
+        raise RuntimeError(
+            f"DEVICE_SECRET must be set to at least {MIN_DEVICE_SECRET_BYTES} bytes"
+        )
+    return value
+
+
+def _cookie_secure() -> bool:
+    return os.getenv("COOKIE_SECURE", "true").lower() not in {"0", "false", "no"}
 
 
 def _sign_device_id(raw_uuid: str) -> str:
-    sig = hmac.new(DEVICE_SECRET.encode("utf-8"), raw_uuid.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+    sig = hmac.new(_device_secret(), raw_uuid.encode("utf-8"), hashlib.sha256).hexdigest()
     return f"{raw_uuid}.{sig}"
 
 
@@ -116,7 +132,7 @@ def _verify_device_id(signed_value: str | None) -> str | None:
         UUID(raw_uuid)
     except (TypeError, ValueError, AttributeError):
         return None
-    expected = hmac.new(DEVICE_SECRET.encode("utf-8"), raw_uuid.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+    expected = hmac.new(_device_secret(), raw_uuid.encode("utf-8"), hashlib.sha256).hexdigest()
     if hmac.compare_digest(sig, expected):
         return raw_uuid
     return None
@@ -167,23 +183,27 @@ def _parse_valid_ip(value: str) -> str | None:
 def client_ip(request: Request) -> str:
     """
     Extract client IP securely.
-    Only trust forwarded headers if the direct connection comes from a trusted internal proxy
-    (loopback or private network). When trusted, use X-Real-IP set by Nginx ($remote_addr).
+    Only trust forwarded headers if the direct connection is in TRUSTED_PROXY_CIDRS.
+    When trusted, use X-Real-IP set by Nginx ($remote_addr).
     Does not trust spoofable client-supplied X-Forwarded-For headers.
     """
     direct_ip = _parse_valid_ip(request.client.host if request.client else "")
     if direct_ip:
         direct_ip_obj = ipaddress.ip_address(direct_ip)
-        if direct_ip_obj.is_loopback or direct_ip_obj.is_private:
+        configured = os.getenv("TRUSTED_PROXY_CIDRS", "127.0.0.0/8,::1/128")
+        trusted_proxies = []
+        for value in configured.split(","):
+            value = value.strip()
+            if not value:
+                continue
+            try:
+                trusted_proxies.append(ipaddress.ip_network(value, strict=False))
+            except ValueError:
+                logger.error("Ignoring invalid TRUSTED_PROXY_CIDRS entry: %s", value)
+        if any(direct_ip_obj in network for network in trusted_proxies):
             x_real_ip = _parse_valid_ip(request.headers.get("x-real-ip", ""))
             if x_real_ip:
                 return x_real_ip
-            x_forwarded_for = request.headers.get("x-forwarded-for", "")
-            if x_forwarded_for:
-                for item in x_forwarded_for.split(","):
-                    ip = _parse_valid_ip(item)
-                    if ip:
-                        return ip
         return direct_ip
     return "unknown"
 
@@ -193,21 +213,10 @@ def _device_id(request: Request, response: Response) -> str:
     valid_uuid = _verify_device_id(cookie_val)
     if valid_uuid:
         return valid_uuid
-    if cookie_val:
-        try:
-            valid_uuid = str(UUID(cookie_val))
-            response.set_cookie(
-                DEVICE_COOKIE, _sign_device_id(valid_uuid), max_age=60 * 60 * 24 * 365,
-                httponly=True, secure=False, samesite="lax",
-            )
-            return valid_uuid
-        except (TypeError, ValueError, AttributeError):
-            pass
-
     new_uuid = str(UUID(bytes=secrets.token_bytes(16)))
     response.set_cookie(
         DEVICE_COOKIE, _sign_device_id(new_uuid), max_age=60 * 60 * 24 * 365,
-        httponly=True, secure=False, samesite="lax",
+        httponly=True, secure=_cookie_secure(), samesite="lax",
     )
     return new_uuid
 
@@ -216,7 +225,7 @@ def _set_session(response: Response, user_id: int, device_id: str, browser_finge
     token = create_session(user_id, device_id, browser_fingerprint)
     response.set_cookie(
         SESSION_COOKIE, token, max_age=60 * 60 * 12,
-        httponly=True, secure=False, samesite="lax",
+        httponly=True, secure=_cookie_secure(), samesite="lax",
     )
 
 
