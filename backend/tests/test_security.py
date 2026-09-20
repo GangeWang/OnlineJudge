@@ -68,3 +68,16 @@ def test_malformed_signature_is_rejected_without_exception(signature):
     assert main._verify_device_id(
         "00000000-0000-0000-0000-000000000001." + signature
     ) is None
+
+
+def test_docker_proxy_preserves_lan_ip_and_ignores_forwarded_chain(monkeypatch):
+    monkeypatch.setenv("TRUSTED_PROXY_CIDRS", "172.18.0.1/32")
+    proxied = request(("172.18.0.1", 1234), [
+        ("x-real-ip", "192.168.137.25"),
+        ("x-forwarded-for", "203.0.113.99"),
+    ])
+    assert main.client_ip(proxied) == "192.168.137.25"
+    other_container = request(("172.18.0.25", 1234), [
+        ("x-real-ip", "192.168.137.25"),
+    ])
+    assert main.client_ip(other_container) == "172.18.0.25"

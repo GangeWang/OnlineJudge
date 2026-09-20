@@ -48,3 +48,17 @@ The override uses loopback ports 18000/18080, a separate Compose network, a tmpf
 HTTPS cookie attributes were inspected on actual responses; a real TLS handshake and browser HTTPS deployment were not tested. The workflow used the explicit HTTP cookie mode. Docker Desktop forwarding can expose a gateway IP, so production proxy trust must be configured for the actual topology.
 
 Old unsigned or truncated legacy signatures are intentionally not trusted or migrated: the old default signing key was public. Such cookies receive a fresh identity; upgrading during an active three-hour login window can therefore trigger an alert if IP/fingerprint also changes. Plan rollout outside active sessions. Cookie/fingerprint identity remains a risk signal, not proof of physical device identity.
+
+## LAN proxy trust follow-up
+
+The host deployment was checked after merging PR #11. Its Nginx-to-backend socket peer was observed as `172.18.0.1`, while the backend trusted only loopback; consequently the forwarded LAN client IP was discarded. The deployment now sets `TRUSTED_PROXY_CIDRS=172.18.0.1/32,127.0.0.1/32,::1/128` in its ignored `.env`, preserving the existing signing key. The backend container was recreated and its effective environment verified. This address is specific to the observed host topology, not a universal Docker default.
+
+A temporary HTTP probe invoked the real `main.client_ip` implementation without database access. Using the host LAN interface through a separate host Nginx and Docker published port produced:
+
+- LAN source preserved: client `192.168.137.6`, socket peer `172.18.0.1`.
+- Injected `X-Real-IP` and `X-Forwarded-For` were overwritten by Nginx; client remained `192.168.137.6`.
+- An untrusted sibling container's forged headers were ignored; client equaled its socket peer (`172.18.0.5`).
+
+This verifies the actual host LAN interface and proxy path, but does not substitute for a request from a separate physical LAN computer. The original website remained accessible through its LAN IP. The probe containers/processes/files were removed after verification; `.env` remains as required deployment configuration and is never committed.
+
+The expanded security regression suite passed: **10 tests passed**. Compose validation and `git diff --check` also passed.
