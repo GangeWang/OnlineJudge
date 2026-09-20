@@ -160,7 +160,7 @@ pip install -r requirements.txt
 啟動 FastAPI：
 
 ```bash
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+uvicorn main:app --reload --host 0.0.0.0 --port 8000 --no-proxy-headers
 ```
 
 目前 `requirements.txt` 包含：
@@ -359,7 +359,7 @@ docker compose up --build
 或本機：
 
 ```bash
-uvicorn main:app --reload
+uvicorn main:app --reload --no-proxy-headers
 ```
 
 ↓
@@ -503,3 +503,11 @@ brew services restart nginx
 ---
 
 # End
+
+### Uvicorn 代理標頭設定
+
+啟動 Uvicorn 時必須加上 `--no-proxy-headers`（Dockerfile 已設定）。來源 IP 由應用程式依 `TRUSTED_PROXY_CIDRS` 與 Nginx 覆寫的 `X-Real-IP` 判斷；若 Uvicorn 先採信 `X-Forwarded-For`，會改寫連線來源，使應用程式的代理信任檢查失去原始依據。請只加入實際代理的精確來源 IP/CIDR；Docker 或 Docker Desktop 的代理來源未必是 loopback。
+
+### 登入狀態恢復
+
+前端重新整理後會透過 `GET /session` 恢復有效 Session 的使用者、答題紀錄及目前裝置的異地登入警告。此端點不建立登入事件，且使用 `Cache-Control: no-store`。`POST /login-alerts` 同樣只回傳目前裝置的警告，避免先登入裝置顯示其他裝置的限制。

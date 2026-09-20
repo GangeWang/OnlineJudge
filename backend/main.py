@@ -128,6 +128,8 @@ def _verify_device_id(signed_value: str | None) -> str | None:
     if len(parts) != 2:
         return None
     raw_uuid, sig = parts
+    if not re.fullmatch(r"[0-9a-f]{64}", sig):
+        return None
     try:
         UUID(raw_uuid)
     except (TypeError, ValueError, AttributeError):
@@ -282,10 +284,36 @@ def login(
     return {"user": user, "login_alert": new_alert}
 
 
+def _session_alerts(request: Request, session):
+    ip = client_ip(request)
+    fingerprint = session.get("browser_fingerprint") or _browser_fingerprint(request)
+    return [
+        alert for alert in list_login_alerts_for_user(session["user_id"])
+        if alert["second_device_id"] == session["device_id"]
+        or (
+            fingerprint
+            and alert["second_ip_address"] == ip
+            and alert.get("second_browser_fp") == fingerprint
+        )
+    ]
+
+
+@app.get("/session")
+def current_session(request: Request, response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    session = get_session(request.cookies.get(SESSION_COOKIE))
+    if not session:
+        return {"user": None, "login_alerts": []}
+    return {
+        "user": {"id": session["user_id"], "username": session["username"]},
+        "login_alerts": _session_alerts(request, session),
+    }
+
+
 @app.post("/login-alerts")
 def login_alerts(request: Request):
     session = authenticated_session(request)
-    return list_login_alerts_for_user(session["user_id"])
+    return _session_alerts(request, session)
 
 
 @app.post("/submit")

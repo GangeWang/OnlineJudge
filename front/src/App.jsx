@@ -87,6 +87,26 @@ export default function App() {
         fetchProblems();
     }, []);
 
+    useEffect(() => {
+        let active = true;
+        const restoreSession = async () => {
+            try {
+                const response = await fetch("/api/session", { credentials: "include" });
+                if (!response.ok) throw new Error("無法恢復登入狀態，請重新登入");
+                const data = await response.json();
+                if (!active || !data.user) return;
+                setCurrentUser(data.user);
+                setLoginAlerts(data.login_alerts);
+                const history = await postForm("/api/submissions", {});
+                if (active) setSubmissions(history);
+            } catch (error) {
+                if (active) setAuthMessage(error.message);
+            }
+        };
+        restoreSession();
+        return () => { active = false; };
+    }, []);
+
     const currentProblem = useMemo(
         () => problems.find((problem) => problem.id === problemId),
         [problems, problemId],

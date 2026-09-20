@@ -61,3 +61,10 @@ def test_only_configured_proxy_can_supply_real_ip(monkeypatch):
     monkeypatch.setenv("TRUSTED_PROXY_CIDRS", "10.0.0.10/32")
     proxied = request(("10.0.0.10", 1234), [("x-real-ip", "203.0.113.7")])
     assert main.client_ip(proxied) == "203.0.113.7"
+
+
+@pytest.mark.parametrize("signature", ["é", "a" * 63, "a" * 65, "g" * 64])
+def test_malformed_signature_is_rejected_without_exception(signature):
+    assert main._verify_device_id(
+        "00000000-0000-0000-0000-000000000001." + signature
+    ) is None
