@@ -4,3 +4,5 @@ python-multipart
 
 pymysql
 argon2-cffi
+
+dnspython>=2.6,<3

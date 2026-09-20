@@ -523,3 +523,24 @@ brew services restart nginx
 5. 從另一台區網電腦直連 OJ 主機內網 IP，驗證登入紀錄等於該電腦的來源 IP；同時夾帶偽造 `X-Real-IP` 與 `X-Forwarded-For`，確認 Nginx 仍覆寫成觀測值。用 `127.0.0.1` 測試只會得到 loopback。
 
 此信任模式假設主機及本機程序可信；不要把後端發布埠開放到外部或不可信轉送器。若用戶端經 NAT 才到達 Nginx，伺服器只能取得 NAT 後的來源，無法從 HTTP 還原 NAT 前的私有 IP。
+
+### 登入主機名稱 `device_name`
+
+`login_events.device_name` 保存登入時的主機名稱提示（`VARCHAR(253) NOT NULL DEFAULT ''`）。後端先以已驗證的來源 IP 查詢管理者的 `DEVICE_NAME_MAP`；未設定時，向容器使用的 DNS 解析器查詢反向 PTR 記錄，最多等待 0.5 秒。查不到、逾時或名稱格式不合法時存空字串，登入不受影響。一般瀏覽器無法直接讀取作業系統主機名稱，後端不採信用戶端自填的主機名稱標頭。
+
+可在本機 `.env` 設定（只是一個例子，請依實際 IP 與名稱修改）：
+
+```dotenv
+DEVICE_NAME_MAP='{"192.168.137.1":"ganges-desktop"}'
+```
+
+設定後執行 `docker compose up -d --no-deps backend`。固定對照需要配合固定 IP／DHCP 保留；若要自動辨識多台電腦，請讓區網 DNS 提供各機器的 PTR 記錄，並確保後端容器能查詢該 DNS。DNS 名稱及管理者對照都是顯示資訊，不保證實體機器身分，也不參與防作弊判定。
+
+新版本啟動時會自動新增欄位，不刪除舊資料。舊紀錄預設留空；同一裝置以相同 IP 再次登入時，可補上仍空白的名稱，不新增登入事件、不改變原登入時間，已記錄的名稱不會被覆寫。查詢時可使用：
+
+```sql
+SELECT id, user_id, ip_address, device_id, device_name,
+       logged_in_at, browser_fingerprint
+FROM login_events
+ORDER BY id DESC;
+```
