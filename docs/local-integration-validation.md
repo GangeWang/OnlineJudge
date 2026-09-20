@@ -62,3 +62,13 @@ A temporary HTTP probe invoked the real `main.client_ip` implementation without 
 This verifies the actual host LAN interface and proxy path, but does not substitute for a request from a separate physical LAN computer. The original website remained accessible through its LAN IP. The probe containers/processes/files were removed after verification; `.env` remains as required deployment configuration and is never committed.
 
 The expanded security regression suite passed: **10 tests passed**. Compose validation and `git diff --check` also passed.
+
+## Separate physical Windows client verification
+
+The remaining physical-client check was completed using a second Windows 11 computer over SSH. Windows routing selected source `192.168.137.1` on `Wi-Fi 2` for destination `192.168.137.6`; its other Ethernet interface had `192.168.10.83`, which was not the source of this connection.
+
+Two uniquely named, disposable accounts were registered and logged in through the existing host Nginx at `http://192.168.137.6/api`. Both registration and login returned HTTP 200, and `/session` returned the expected user. The second case supplied forged `X-Real-IP: 203.0.113.99` and `X-Forwarded-For: 198.51.100.77`.
+
+Direct verification of the real backend database showed `login_events.ip_address = 192.168.137.1` for both cases. This matches the remote computer's selected interface and confirms that the forwarded IP cannot be overridden with those client-supplied headers.
+
+The two test accounts and their dependent session/login records were removed immediately after verification. No test files were written on the Windows computer. SSH connection state, temporary host-key file, encoded test commands and local output logs were removed. SSH credentials were not saved to the repository or report.
