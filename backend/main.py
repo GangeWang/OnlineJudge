@@ -12,6 +12,7 @@ from uuid import UUID
 from fastapi import FastAPI, Form, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from judge import judge_submission
+from device_names import configured_device_names, resolve_device_name
 from pymysql.err import IntegrityError
 
 from database import (
@@ -34,6 +35,7 @@ from database import (
 async def lifespan(app: FastAPI):
     # Fail closed at startup instead of silently signing cookies with a public key.
     _device_secret()
+    configured_device_names()
     init_db()
     yield
 
@@ -265,7 +267,8 @@ def login(
             other_user["id"],
         )
         raise HTTPException(status_code=403, detail="此裝置三小時內已登入其他帳號，暫時無法登入")
-    _, new_alert = record_login(user["id"], ip, device_id, fingerprint)
+    device_name = resolve_device_name(ip)
+    _, new_alert = record_login(user["id"], ip, device_id, fingerprint, device_name=device_name)
     if new_alert:
         logger.warning(
             "Cross-device login warning username=%s user_id=%s "

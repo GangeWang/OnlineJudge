@@ -100,6 +100,7 @@ def init_db(max_attempts: int = 20, delay_seconds: float = 1.5):
                             user_id INT NOT NULL,
                             ip_address VARCHAR(45) NOT NULL,
                             device_id CHAR(36) NOT NULL,
+                            device_name VARCHAR(253) NOT NULL DEFAULT '',
                             browser_fingerprint CHAR(64) NOT NULL DEFAULT '',
                             logged_in_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                             INDEX idx_login_events_user_time (user_id, logged_in_at),
@@ -111,6 +112,7 @@ def init_db(max_attempts: int = 20, delay_seconds: float = 1.5):
                         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                         """
                     )
+                    cursor.execute("ALTER TABLE login_events ADD COLUMN IF NOT EXISTS device_name VARCHAR(253) NOT NULL DEFAULT '' AFTER device_id")
                     cursor.execute("ALTER TABLE login_events ADD COLUMN IF NOT EXISTS browser_fingerprint CHAR(64) NOT NULL DEFAULT ''")
                     cursor.execute("ALTER TABLE users MODIFY password_hash VARCHAR(255) NOT NULL")
                     cursor.execute(
@@ -271,7 +273,7 @@ def record_submission_attempt(user_id: int, problem_id: str):
             return 0
 
 
-def record_login(user_id: int, ip_address: str, device_id: str, browser_fingerprint: str = ""):
+def record_login(user_id: int, ip_address: str, device_id: str, browser_fingerprint: str = "", device_name: str = ""):
     """Store a login and return active alerts plus the newly created alert, if any."""
     with get_connection() as connection:
         with connection.cursor() as cursor:
@@ -302,7 +304,15 @@ def record_login(user_id: int, ip_address: str, device_id: str, browser_fingerpr
                     """,
                     (user_id, device_id),
                 )
-            if cursor.fetchone():
+            recent_login = cursor.fetchone()
+            if recent_login:
+                # Only enrich an unnamed event from the same IP/device; preserve history.
+                if device_name:
+                    cursor.execute(
+                        "UPDATE login_events SET device_name = %s "
+                        "WHERE id = %s AND device_id = %s AND ip_address = %s AND device_name = ''",
+                        (device_name, recent_login["id"], device_id, ip_address),
+                    )
                 # A page reload or re-login from the same browser/device signs in again.
                 # Do not create another event. Keep the alert visible only on
                 # the later device that originally caused the alert.
@@ -348,10 +358,10 @@ def record_login(user_id: int, ip_address: str, device_id: str, browser_fingerpr
             new_alert = None
             cursor.execute(
                 """
-                INSERT INTO login_events (user_id, ip_address, device_id, browser_fingerprint)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO login_events (user_id, ip_address, device_id, browser_fingerprint, device_name)
+                VALUES (%s, %s, %s, %s, %s)
                 """,
-                (user_id, ip_address, device_id, browser_fingerprint),
+                (user_id, ip_address, device_id, browser_fingerprint, device_name),
             )
             if previous_login:
                 new_alert = {

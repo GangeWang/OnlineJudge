@@ -1,0 +1,5 @@
+
+# Deployment secrets stay on the host.
+.env
+.env.*
+!.env.example

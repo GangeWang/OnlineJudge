@@ -48,3 +48,27 @@ The override uses loopback ports 18000/18080, a separate Compose network, a tmpf
 HTTPS cookie attributes were inspected on actual responses; a real TLS handshake and browser HTTPS deployment were not tested. The workflow used the explicit HTTP cookie mode. Docker Desktop forwarding can expose a gateway IP, so production proxy trust must be configured for the actual topology.
 
 Old unsigned or truncated legacy signatures are intentionally not trusted or migrated: the old default signing key was public. Such cookies receive a fresh identity; upgrading during an active three-hour login window can therefore trigger an alert if IP/fingerprint also changes. Plan rollout outside active sessions. Cookie/fingerprint identity remains a risk signal, not proof of physical device identity.
+
+## LAN proxy trust follow-up
+
+The host deployment was checked after merging PR #11. Its Nginx-to-backend socket peer was observed as `172.18.0.1`, while the backend trusted only loopback; consequently the forwarded LAN client IP was discarded. The deployment now sets `TRUSTED_PROXY_CIDRS=172.18.0.1/32,127.0.0.1/32,::1/128` in its ignored `.env`, preserving the existing signing key. The backend container was recreated and its effective environment verified. This address is specific to the observed host topology, not a universal Docker default.
+
+A temporary HTTP probe invoked the real `main.client_ip` implementation without database access. Using the host LAN interface through a separate host Nginx and Docker published port produced:
+
+- LAN source preserved: client `192.168.137.6`, socket peer `172.18.0.1`.
+- Injected `X-Real-IP` and `X-Forwarded-For` were overwritten by Nginx; client remained `192.168.137.6`.
+- An untrusted sibling container's forged headers were ignored; client equaled its socket peer (`172.18.0.5`).
+
+This verifies the actual host LAN interface and proxy path, but does not substitute for a request from a separate physical LAN computer. The original website remained accessible through its LAN IP. The probe containers/processes/files were removed after verification; `.env` remains as required deployment configuration and is never committed.
+
+The expanded security regression suite passed: **10 tests passed**. Compose validation and `git diff --check` also passed.
+
+## Separate physical Windows client verification
+
+The remaining physical-client check was completed using a second Windows 11 computer over SSH. Windows routing selected source `192.168.137.1` on `Wi-Fi 2` for destination `192.168.137.6`; its other Ethernet interface had `192.168.10.83`, which was not the source of this connection.
+
+Two uniquely named, disposable accounts were registered and logged in through the existing host Nginx at `http://192.168.137.6/api`. Both registration and login returned HTTP 200, and `/session` returned the expected user. The second case supplied forged `X-Real-IP: 203.0.113.99` and `X-Forwarded-For: 198.51.100.77`.
+
+Direct verification of the real backend database showed `login_events.ip_address = 192.168.137.1` for both cases. This matches the remote computer's selected interface and confirms that the forwarded IP cannot be overridden with those client-supplied headers.
+
+The two test accounts and their dependent session/login records were removed immediately after verification. No test files were written on the Windows computer. SSH connection state, temporary host-key file, encoded test commands and local output logs were removed. SSH credentials were not saved to the repository or report.
