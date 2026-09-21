@@ -56,7 +56,9 @@ const postForm = async (url, fields) => {
     });
     const data = await res.json();
     if (!res.ok) {
-        throw new Error(data.detail || "Request failed");
+        const error = new Error(data.detail || "Request failed");
+        error.status = res.status;
+        throw error;
     }
     return data;
 };
@@ -73,27 +75,48 @@ export default function App() {
     const [authMessage, setAuthMessage] = useState("");
     const [submissions, setSubmissions] = useState([]);
     const [loginAlerts, setLoginAlerts] = useState([]);
+    const [registrationEnabled, setRegistrationEnabled] = useState(false);
 
     useEffect(() => {
+        fetch("/api/auth-config", { credentials: "include" })
+            .then((res) => res.ok ? res.json() : null)
+            .then((data) => setRegistrationEnabled(Boolean(data?.registration_enabled)))
+            .catch(() => setRegistrationEnabled(false));
+    }, []);
+
+    useEffect(() => {
+        if (!currentUser) return;
+        let active = true;
         const fetchProblems = async () => {
-            const res = await fetch("/api/problems");
-            const data = await res.json();
-            setProblems(data);
-            if (data.length > 0) {
-                setProblemId(data[0].id);
+            try {
+                const res = await fetch("/api/problems", {
+                    credentials: "include",
+                    headers: { "X-Client-Fingerprint": getClientFingerprint() },
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.detail || "無法載入題目");
+                if (!active) return;
+                setProblems(data);
+                setProblemId(data[0]?.id || "");
+            } catch (error) {
+                if (active) {
+                    setProblems([]);
+                    setProblemId("");
+                    setAuthMessage(error.message);
+                }
             }
         };
-
         fetchProblems();
-    }, []);
+        return () => { active = false; };
+    }, [currentUser]);
 
     useEffect(() => {
         let active = true;
         const restoreSession = async () => {
             try {
-                const response = await fetch("/api/session", { credentials: "include" });
-                if (!response.ok) throw new Error("無法恢復登入狀態，請重新登入");
+                const response = await fetch("/api/session", { credentials: "include", headers: { "X-Client-Fingerprint": getClientFingerprint() } });
                 const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || "無法恢復登入狀態，請重新登入");
                 if (!active || !data.user) return;
                 setCurrentUser(data.user);
                 setLoginAlerts(data.login_alerts);
@@ -112,10 +135,23 @@ export default function App() {
         [problems, problemId],
     );
 
+    const clearSession = () => {
+        setCurrentUser(null);
+        setProblems([]);
+        setProblemId("");
+        setSubmissions([]);
+        setLoginAlerts([]);
+    };
+
     const loadSubmissions = async () => {
         if (!currentUser) return;
-        const data = await postForm("/api/submissions", {});
-        setSubmissions(data);
+        try {
+            const data = await postForm("/api/submissions", {});
+            setSubmissions(data);
+        } catch (error) {
+            if (error.status === 401 || error.status === 403) clearSession();
+            setAuthMessage(error.message);
+        }
     };
 
     const handleAuth = async (mode) => {
@@ -128,13 +164,14 @@ export default function App() {
             const history = await postForm("/api/submissions", {});
             setSubmissions(history);
         } catch (error) {
+            clearSession();
             setAuthMessage(error.message);
         }
     };
 
     const submitCode = async () => {
         if (!currentUser) {
-            setResult("請先登入或註冊帳號後再提交");
+            setResult("請先登入後再提交");
             return;
         }
 
@@ -149,6 +186,7 @@ export default function App() {
             setResult(JSON.stringify(data, null, 2));
             await loadSubmissions();
         } catch (error) {
+            if (error.status === 401 || error.status === 403) clearSession();
             setResult(error.message);
         }
     };
@@ -175,9 +213,11 @@ export default function App() {
                     </div>
                     <div className="auth-actions">
                         <button onClick={() => handleAuth("login")}>登入</button>
-                        <button onClick={() => handleAuth("register")} className="secondary-button">
-                            建立帳號
-                        </button>
+                        {registrationEnabled && (
+                            <button onClick={() => handleAuth("register")} className="secondary-button">
+                                建立帳號
+                            </button>
+                        )}
                     </div>
                     {currentUser && <p className="current-user">目前使用者：{currentUser.username}</p>}
                     {authMessage && <p className="auth-message">{authMessage}</p>}

@@ -1,12 +1,22 @@
 services:
   backend:
+    build:
+      context: .
+      dockerfile: deploy/integration/Dockerfile
     image: onlineoj-integration:local
     ports: !override ["127.0.0.1:18000:8000"]
     environment:
+      OJ_INTEGRATION_TEST: "1"
+      EXAM_MODE: "true"
+      REGISTRATION_ENABLED: "false"
+      COOKIE_SECURE: "true"
+      ALLOW_INSECURE_HTTP: "false"
       MARIADB_HOST: db
       MARIADB_PASSWORD: integration-only
       HOST_BACKEND_DIR: ${PWD}/backend
       TRUSTED_PROXY_CIDRS: 172.29.247.10/32,127.0.0.1/32
+    volumes:
+      - ./work/test-tls/fullchain.pem:/test-ca.pem:ro
     depends_on:
       db:
         condition: service_healthy
@@ -25,8 +35,11 @@ services:
       retries: 40
   nginx:
     image: nginx:alpine
-    ports: ["127.0.0.1:18080:80"]
-    volumes: ["./deploy/integration/nginx.conf:/etc/nginx/conf.d/default.conf:ro"]
+    ports: ["127.0.0.1:18080:80", "127.0.0.1:18443:443"]
+    volumes:
+      - ./deploy/integration/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./work/test-tls:/etc/nginx/tls:ro
+      - ./front/dist:/usr/share/nginx/html:ro
     networks:
       default:
         ipv4_address: 172.29.247.10

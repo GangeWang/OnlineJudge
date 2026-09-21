@@ -1,5 +1,7 @@
 # Local integration validation — 2026-09-20
 
+> Historical results before the exam security changes. The current policy blocks all related sessions and requires HTTPS. Use [exam-security.md](exam-security.md) for current setup and tests.
+
 Tested the changes from PR #11 (`codex/pr`, starting at `1f20e01`) on macOS arm64. The local main checkout was `46b53ec`. The previously reported short SHA `87470c6` was not present; the matching published fix is `1f20e01`.
 
 ## Findings fixed

@@ -1,5 +1,7 @@
 # OnlineJudge 使用說明書
 
+> 考試安全預設已更新：強制 HTTPS、關閉註冊、衝突時封鎖所有相關 Session。升級與完整测试請先閱讀 [考試安全部署說明](docs/exam-security.md)。
+
 本專案是一個簡易版 Online Judge（OJ）系統，採用以下技術：
 
 * **前端**：React + Vite
@@ -53,7 +55,10 @@ OnlineJudge/
 | `MARIADB_DATABASE` | 資料庫名稱             | `onlinejudge`             |
 | `DEVICE_SECRET`    | 裝置 Cookie 的 HMAC 密鑰（至少 32 bytes） | **必填，無預設值** |
 | `COOKIE_SECURE`    | 是否只透過 HTTPS 傳送 Cookie | `true` |
-| `TRUSTED_PROXY_CIDRS` | 可提供 `X-Real-IP` 的可信代理 CIDR（逗號分隔） | `127.0.0.0/8,::1/128` |
+| `EXAM_MODE` | 考試模式，關閉註冊並限制同 IP 多帳號 | `true` |
+| `REGISTRATION_ENABLED` | 非考試模式是否開放註冊 | `false` |
+| `ALLOW_INSECURE_HTTP` | 明確允許本機開發 HTTP | `false` |
+| `TRUSTED_PROXY_CIDRS` | 可提供 `X-Real-IP` 的可信代理 CIDR（逗號分隔） | `127.0.0.1/32,::1/128` |
 
 目前 `docker-compose.yml` 內 `backend` 服務預設：
 
@@ -68,7 +73,7 @@ MARIADB_DATABASE=onlinejudge
 DEVICE_SECRET=<至少 32 bytes 的隨機密鑰>
 ```
 
-可使用 `openssl rand -hex 32` 產生 `DEVICE_SECRET`。請勿提交此密鑰，且所有後端實例必須使用相同值。若目前只使用範例中的 HTTP Nginx，需明確設定 `COOKIE_SECURE=false`；啟用 TLS 後應改回 `true`。
+可使用 `openssl rand -hex 32` 產生 `DEVICE_SECRET`。請勿提交此密鑰，且所有後端實例必須使用相同值。範例 Nginx 現在需要 TLS 憑證；請依 [部署說明](docs/exam-security.md) 設定。只有隔離本機開發可同時設定 `ALLOW_INSECURE_HTTP=true` 與 `COOKIE_SECURE=false`。
 
 > 若你的環境沒有 `PWD`，請手動設定 `HOST_BACKEND_DIR` 為實際的 backend 絕對路徑，避免判題時 Docker 掛載失敗。
 
@@ -87,8 +92,9 @@ docker compose up --build
 啟動成功後：
 
 ```
-Backend API:
-http://localhost:8000
+Backend upstream (僅供可信 Nginx 連接，直接 HTTP 請求會被拒絕):
+http://127.0.0.1:8000
+Browser URL: https://<OJ host>
 ```
 
 目前 `docker-compose.yml` 僅啟動：
@@ -381,21 +387,11 @@ npm run dev
 
 * 登入
 
-### 異地登入偵測
+### 登入與來源衝突
 
-登入時，系統會記錄連線 IP 與瀏覽器保存的裝置識別碼。同一個校園、公司或家庭網路的多台電腦常會經由 NAT 共用同一個對外 IP，因此異地登入以不同裝置識別碼判定，而非僅依 IP。IP 仍會保留在警告中供管理者比對。
+每次通過密碼驗證的登入都會記錄。三小時內發現帳號來源衝突或共用裝置／考試來源 IP 時，所有相關帳號與 Session 都會被封鎖。受保護 API 核對當前裝置 Cookie、IP 與指紋；題目只能登入後讀取，重新整理也必須通過相同檢查。
 
-同一帳號在三小時內由不同裝置識別碼登入時，後端會記錄並輸出警告；只有後登入的裝置會立即看到警告，並在三小時內被拒絕提交答案。先登入的裝置不會因後續有人嘗試登入而被中斷或阻擋提交。
-
-異地登入提示會在後登入裝置的重新登入或 F5 後持續顯示至三小時窗口結束；先登入裝置不會顯示該提示。為避免多人共用帳號規避偵測，同一個瀏覽器裝置識別碼在三小時內也只能登入一個帳號；登入第二個帳號會被後端拒絕並記錄在日誌中。
-
-瀏覽器基於安全與隱私限制，網頁無法讀取使用者網卡的真實 MAC 位址。因此後端會產生隨機 UUID、以 HMAC 簽章後保存於 HttpOnly Cookie；它不是實體硬體身分，也不能防止使用者清除 Cookie。每次偵測到異地登入時，後端日誌會輸出帳號、兩端 IP、裝置識別碼與輔助用的瀏覽器指紋，方便管理者追查。
-
-只有直接連線來源符合 `TRUSTED_PROXY_CIDRS` 時，後端才採用代理覆寫的 `X-Real-IP`；其他連線所帶的來源 IP 標頭一律忽略。範例 Nginx 會以 `$remote_addr` 覆寫該標頭，避免沿用客戶端自行提供的值。
-* 題目列表
-* 提交程式
-* 判題結果
-* 資料庫紀錄
+請依 [考試安全部署說明](docs/exam-security.md) 安排獨立來源 IP、預先建立帳號、配置 HTTPS 並了解共用 NAT 的限制。Cookie、指紋與主機名稱不能證明實體電腦身分。
 
 ---
 
@@ -428,7 +424,7 @@ npm run build
 
 2. 啟動後端服務（例如 `127.0.0.1:8000`）。
 
-3. 將 `deploy/nginx/oj.conf` 內的 `root` 改為你的 `front/dist` 絕對路徑。
+3. 設定 `root`、`server_name` 與考試電腦信任的 TLS 憑證／私鑰路徑，見 [HTTPS 部署步驟](docs/exam-security.md)。
 
 4. 將 Nginx 設定檔連結到啟用目錄後重載：
 
@@ -479,26 +475,13 @@ brew services restart nginx
 
 6. 驗證網站與 API：
 
-* `http://localhost:8080` 可開啟前端頁面
+* `https://<OJ host>` 可開啟前端頁面，憑證有效且被考試電腦信任
 * `/api/*` 可正常轉發到後端
 * 後端可收到 `X-Forwarded-For` / `X-Real-IP`
 
-## 10.2 反作弊機制（補充說明）
+## 10.2 考試存取與稽核
 
-目前系統的防作弊核心是「帳號 + 瀏覽器裝置識別碼 + 時間窗口」聯合判定，重點如下：
-
-1. 不以前端回傳的任意欄位作為可信依據，來源 IP 以伺服器/代理層觀測值為準。
-2. 三小時內同帳號若出現不同裝置識別碼登入，會觸發異地登入警告並限制後登入端提交。
-3. 三小時內同一裝置識別碼僅允許登入一個帳號，降低共用裝置輪替帳號的規避行為。
-4. 重新整理頁面不會改變同一瀏覽器的裝置識別碼，避免誤判。
-5. 裝置 Cookie 由後端以部署專用密鑰簽章；無效或舊版未簽章 Cookie 會被替換，而不會由伺服器代為簽章。
-6. 後端日誌保留帳號、IP 與裝置識別碼，提供管理者事後稽核依據。
-
-管理建議：
-
-* 於校內或公司內網部署時，請將代理實際來源位址（建議精確 `/32` 或 `/128`）加入 `TRUSTED_PROXY_CIDRS`，並確保代理覆寫 `X-Real-IP`。不要把整個私人網段視為可信代理，否則能直接連到後端的內網用戶可偽造來源 IP。
-* 對於共用 NAT 環境（教室、宿舍、辦公室），請以「裝置識別碼差異」為主要告警依據，IP 用於輔助比對。
-* 瀏覽器指紋與所有前端標頭都可由惡意客戶端修改，只能作為風險訊號，不能視為可信的硬體身分。若考試需要強身分綁定，應另行採用受管理裝置憑證或 WebAuthn 等機制。
+詳見 [登入規則、稽核欄位與限制](docs/exam-security.md)。新規則會中止所有相關 Session，不再只限制後登入的裝置。成功和被拒絕的提交都會保留可追查的來源資料；登入與提交寫入前的安全決策透過資料庫鎖序列化。
 
 ---
 
@@ -510,7 +493,7 @@ brew services restart nginx
 
 ### 登入狀態恢復
 
-前端重新整理後會透過 `GET /session` 恢復有效 Session 的使用者、答題紀錄及目前裝置的異地登入警告。此端點不建立登入事件，且使用 `Cache-Control: no-store`。`POST /login-alerts` 同樣只回傳目前裝置的警告，避免先登入裝置顯示其他裝置的限制。
+前端重新整理透過 `GET /session` 恢復有效登入，接著載入題目與紀錄。它會驗證目前來源，不建立登入事件，回應帶有 `Cache-Control: no-store`。來源衝突時回應 403 並顯示重新登入／聯絡監考提示；過期或舊版未綁定 Session 則恢復為未登入。
 
 ### 同區網用戶端 IP 與 Docker Desktop
 
@@ -536,7 +519,7 @@ DEVICE_NAME_MAP='{"192.168.137.1":"ganges-desktop"}'
 
 設定後執行 `docker compose up -d --no-deps backend`。固定對照需要配合固定 IP／DHCP 保留；若要自動辨識多台電腦，請讓區網 DNS 提供各機器的 PTR 記錄，並確保後端容器能查詢該 DNS。DNS 名稱及管理者對照都是顯示資訊，不保證實體機器身分，也不參與防作弊判定。
 
-新版本啟動時會自動新增欄位，不刪除舊資料。舊紀錄預設留空；同一裝置以相同 IP 再次登入時，可補上仍空白的名稱，不新增登入事件、不改變原登入時間，已記錄的名稱不會被覆寫。查詢時可使用：
+新版本啟動時會自動新增欄位，不刪除舊資料。舊紀錄預設留空；每次登入會建立新事件並保存該次取得的名稱，舊事件與名稱不會被覆寫。查詢時可使用：
 
 ```sql
 SELECT id, user_id, ip_address, device_id, device_name,
