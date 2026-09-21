@@ -3,3 +3,10 @@
 .env
 .env.*
 !.env.example
+
+# Generated test and judge artifacts.
+work/
+__pycache__/
+.pytest_cache/
+backend/temp/
+.DS_Store
