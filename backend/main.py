@@ -20,6 +20,7 @@ from database import (
     create_user,
     create_session,
     db_config,
+    NO_USER_ID,
     find_recent_other_user_on_device,
     get_session,
     init_db,
@@ -120,6 +121,25 @@ def _cookie_secure() -> bool:
     return os.getenv("COOKIE_SECURE", "true").lower() not in {"0", "false", "no"}
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.getenv(name, "").strip().lower()
+    if not value:
+        return default
+    return value not in {"0", "false", "no", "off"}
+
+
+def _lan_exam_mode() -> bool:
+    """Every exam seat has its own LAN IP, so the client IP becomes part of device identity.
+
+    Off by default because NAT networks (campus, home, office) share one IP between machines.
+    """
+    return _env_flag("LAN_EXAM_MODE", False)
+
+
+def _registration_open() -> bool:
+    return _env_flag("ALLOW_REGISTRATION", True)
+
+
 def _sign_device_id(raw_uuid: str) -> str:
     sig = hmac.new(_device_secret(), raw_uuid.encode("utf-8"), hashlib.sha256).hexdigest()
     return f"{raw_uuid}.{sig}"
@@ -156,22 +176,76 @@ def _browser_fingerprint(request: Request) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+MULTI_ACCOUNT_DETAIL = "此裝置三小時內已登入其他帳號，暫時無法登入"
+
+
+def _reject_if_device_has_other_account(
+    user_id: int, username: str, device_id: str, ip: str, fingerprint: str, lan_mode: bool,
+):
+    other_user = find_recent_other_user_on_device(user_id, device_id, ip, fingerprint, lan_mode=lan_mode)
+    if other_user:
+        logger.warning(
+            "Multiple-account login blocked username=%s user_id=%s ip=%s "
+            "browser_device_id=%s browser_fingerprint=%s previous_username=%s previous_user_id=%s",
+            username,
+            user_id,
+            ip,
+            device_id,
+            fingerprint,
+            other_user["username"],
+            other_user["id"],
+        )
+        raise HTTPException(status_code=403, detail=MULTI_ACCOUNT_DETAIL)
+
+
+def _record_login_and_start_session(
+    response: Response, user: dict, device_id: str, ip: str, fingerprint: str, lan_mode: bool,
+):
+    device_name = resolve_device_name(ip)
+    _, new_alert = record_login(
+        user["id"], ip, device_id, fingerprint, device_name=device_name, lan_mode=lan_mode,
+    )
+    if new_alert:
+        logger.warning(
+            "Cross-device login warning username=%s user_id=%s "
+            "first_ip=%s first_browser_device_id=%s first_browser_fp=%s "
+            "attempted_ip=%s attempted_browser_device_id=%s attempted_browser_fp=%s",
+            user["username"],
+            user["id"],
+            new_alert["first_ip_address"],
+            new_alert["first_device_id"],
+            new_alert.get("first_browser_fp", ""),
+            new_alert["second_ip_address"],
+            new_alert["second_device_id"],
+            new_alert.get("second_browser_fp", ""),
+        )
+    _set_session(response, user["id"], device_id, fingerprint, ip)
+    return new_alert
+
+
 @app.post("/register")
 def register(request: Request, response: Response, username: str = Form(...), password: str = Form(...)):
+    if not _registration_open():
+        raise HTTPException(status_code=403, detail="目前不開放自行註冊，請使用管理者提供的帳號")
     username = username.strip()
     if len(username) < 3 or len(username) > 64:
         raise HTTPException(status_code=400, detail="帳號需為 3 到 64 個字元")
     if len(password) < 6:
         raise HTTPException(status_code=400, detail="密碼至少需要 6 個字元")
 
+    # Registration signs the new account in, so it obeys the same rules as /login:
+    # check the device before creating the account, then record the login event.
+    device_id = _device_id(request, response)
+    ip = client_ip(request)
+    fingerprint = _browser_fingerprint(request)
+    lan_mode = _lan_exam_mode()
+    _reject_if_device_has_other_account(NO_USER_ID, username, device_id, ip, fingerprint, lan_mode)
     try:
         user = create_user(username, password)
-        device_id = _device_id(request, response)
-        fingerprint = _browser_fingerprint(request)
-        _set_session(response, user["id"], device_id, fingerprint)
-        return {"user": user}
     except IntegrityError:
         raise HTTPException(status_code=409, detail="帳號已存在")
+    _record_login_and_start_session(response, user, device_id, ip, fingerprint, lan_mode)
+    return {"user": user}
 
 
 def _parse_valid_ip(value: str) -> str | None:
@@ -227,16 +301,48 @@ def _device_id(request: Request, response: Response) -> str:
     return new_uuid
 
 
-def _set_session(response: Response, user_id: int, device_id: str, browser_fingerprint: str = ""):
-    token = create_session(user_id, device_id, browser_fingerprint)
+def _set_session(response: Response, user_id: int, device_id: str, browser_fingerprint: str = "", ip: str = ""):
+    token = create_session(user_id, device_id, browser_fingerprint, ip)
     response.set_cookie(
         SESSION_COOKIE, token, max_age=60 * 60 * 12,
         httponly=True, secure=_cookie_secure(), samesite="lax",
     )
 
 
-def authenticated_session(request: Request):
+def _bound_session(request: Request):
+    """Return the session only when presented with the device cookie it was issued to.
+
+    In LAN exam mode the request must also come from the IP that signed in. A copied
+    session cookie alone therefore cannot submit from another machine.
+    """
     session = get_session(request.cookies.get(SESSION_COOKIE))
+    if not session:
+        return None
+    request_device_id = _verify_device_id(request.cookies.get(DEVICE_COOKIE))
+    ip = client_ip(request)
+    mismatches = []
+    if request_device_id != session["device_id"]:
+        mismatches.append("device")
+    if _lan_exam_mode() and session.get("ip_address") and ip != session["ip_address"]:
+        mismatches.append("ip")
+    if mismatches:
+        logger.warning(
+            "Session rejected: presented from a different %s username=%s user_id=%s "
+            "session_ip=%s request_ip=%s session_device_id=%s request_device_id=%s",
+            "/".join(mismatches),
+            session["username"],
+            session["user_id"],
+            session.get("ip_address", ""),
+            ip,
+            session["device_id"],
+            request_device_id,
+        )
+        return None
+    return session
+
+
+def authenticated_session(request: Request):
+    session = _bound_session(request)
     if not session:
         raise HTTPException(status_code=401, detail="請先登入")
     return session
@@ -255,45 +361,24 @@ def login(
     device_id = _device_id(request, response)
     ip = client_ip(request)
     fingerprint = _browser_fingerprint(request)
-    other_user = find_recent_other_user_on_device(user["id"], device_id, ip, fingerprint)
-    if other_user:
-        logger.warning(
-            "Multiple-account login blocked username=%s user_id=%s ip=%s "
-            "browser_device_id=%s browser_fingerprint=%s previous_username=%s previous_user_id=%s",
-            user["username"],
-            user["id"],
-            ip,
-            device_id,
-            fingerprint,
-            other_user["username"],
-            other_user["id"],
-        )
-        raise HTTPException(status_code=403, detail="此裝置三小時內已登入其他帳號，暫時無法登入")
-    device_name = resolve_device_name(ip)
-    _, new_alert = record_login(user["id"], ip, device_id, fingerprint, device_name=device_name)
-    if new_alert:
-        logger.warning(
-            "Cross-device login warning username=%s user_id=%s "
-            "first_ip=%s first_browser_device_id=%s first_browser_fp=%s "
-            "attempted_ip=%s attempted_browser_device_id=%s attempted_browser_fp=%s",
-            user["username"],
-            user["id"],
-            new_alert["first_ip_address"],
-            new_alert["first_device_id"],
-            new_alert.get("first_browser_fp", ""),
-            new_alert["second_ip_address"],
-            new_alert["second_device_id"],
-            new_alert.get("second_browser_fp", ""),
-        )
-    _set_session(response, user["id"], device_id, fingerprint)
+    lan_mode = _lan_exam_mode()
+    _reject_if_device_has_other_account(user["id"], user["username"], device_id, ip, fingerprint, lan_mode)
+    new_alert = _record_login_and_start_session(response, user, device_id, ip, fingerprint, lan_mode)
     return {"user": user, "login_alert": new_alert}
 
 
 def _session_alerts(request: Request, session):
     ip = client_ip(request)
     fingerprint = session.get("browser_fingerprint") or _browser_fingerprint(request)
+    alerts = list_login_alerts_for_user(session["user_id"])
+    if _lan_exam_mode() and ip != "unknown":
+        # Show the warning only on the later seat, even when it copied the first seat's device cookie.
+        return [
+            alert for alert in alerts
+            if alert["second_device_id"] == session["device_id"] and alert["second_ip_address"] == ip
+        ]
     return [
-        alert for alert in list_login_alerts_for_user(session["user_id"])
+        alert for alert in alerts
         if alert["second_device_id"] == session["device_id"]
         or (
             fingerprint
@@ -306,7 +391,7 @@ def _session_alerts(request: Request, session):
 @app.get("/session")
 def current_session(request: Request, response: Response):
     response.headers["Cache-Control"] = "no-store"
-    session = get_session(request.cookies.get(SESSION_COOKIE))
+    session = _bound_session(request)
     if not session:
         return {"user": None, "login_alerts": []}
     return {
@@ -339,6 +424,7 @@ def submit(
         session.get("device_id", ""),
         ip,
         session.get("browser_fingerprint") or fingerprint,
+        lan_mode=_lan_exam_mode(),
     ):
         raise HTTPException(
             status_code=403,

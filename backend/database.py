@@ -13,6 +13,8 @@ import pymysql
 from pymysql.cursors import DictCursor
 
 MIN_DB_PASSWORD_CHARS = 16
+# AUTO_INCREMENT ids start at 1, so 0 never matches an account.
+NO_USER_ID = 0
 # Passwords that were once published in this repository; they must never be accepted again.
 PUBLISHED_DB_PASSWORDS = frozenset({"onlinejudge"})
 
@@ -82,6 +84,7 @@ def init_db(max_attempts: int = 20, delay_seconds: float = 1.5):
                             user_id INT NOT NULL,
                             device_id CHAR(36) NOT NULL,
                             browser_fingerprint CHAR(64) NOT NULL DEFAULT '',
+                            ip_address VARCHAR(45) NOT NULL DEFAULT '',
                             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                             expires_at TIMESTAMP NOT NULL,
                             INDEX idx_sessions_user (user_id),
@@ -93,6 +96,7 @@ def init_db(max_attempts: int = 20, delay_seconds: float = 1.5):
                         """
                     )
                     cursor.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS browser_fingerprint CHAR(64) NOT NULL DEFAULT ''")
+                    cursor.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS ip_address VARCHAR(45) NOT NULL DEFAULT ''")
                     cursor.execute(
                         """
                         CREATE TABLE IF NOT EXISTS submission_attempts (
@@ -223,16 +227,22 @@ def authenticate_user(username: str, password: str):
     return {"id": user["id"], "username": user["username"]}
 
 
-def create_session(user_id: int, device_id: str, browser_fingerprint: str = "", lifetime_hours: int = 12):
+def create_session(
+    user_id: int,
+    device_id: str,
+    browser_fingerprint: str = "",
+    ip_address: str = "",
+    lifetime_hours: int = 12,
+):
     token = secrets.token_urlsafe(32)
     with get_connection() as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT INTO sessions (token_hash, user_id, device_id, browser_fingerprint, expires_at)
-                VALUES (%s, %s, %s, %s, DATE_ADD(CURRENT_TIMESTAMP(), INTERVAL %s HOUR))
+                INSERT INTO sessions (token_hash, user_id, device_id, browser_fingerprint, ip_address, expires_at)
+                VALUES (%s, %s, %s, %s, %s, DATE_ADD(CURRENT_TIMESTAMP(), INTERVAL %s HOUR))
                 """,
-                (hash_session_token(token), user_id, device_id, browser_fingerprint, lifetime_hours),
+                (hash_session_token(token), user_id, device_id, browser_fingerprint, ip_address, lifetime_hours),
             )
     return token
 
@@ -245,7 +255,7 @@ def get_session(token: str):
             cursor.execute(
                 """
                 SELECT sessions.user_id, sessions.device_id,
-                       sessions.browser_fingerprint, users.username
+                       sessions.browser_fingerprint, sessions.ip_address, users.username
                 FROM sessions
                 JOIN users ON users.id = sessions.user_id
                 WHERE sessions.token_hash = %s
@@ -288,11 +298,50 @@ def record_submission_attempt(user_id: int, problem_id: str):
             return 0
 
 
-def record_login(user_id: int, ip_address: str, device_id: str, browser_fingerprint: str = "", device_name: str = ""):
-    """Store a login and return active alerts plus the newly created alert, if any."""
+def _known_ip(ip_address: str) -> bool:
+    return bool(ip_address) and ip_address != "unknown"
+
+
+def _is_same_device_alert(alert: dict, device_id: str, ip_address: str, browser_fingerprint: str, lan_mode: bool) -> bool:
+    """Whether an alert belongs to the device that is currently signing in or submitting."""
+    if lan_mode and _known_ip(ip_address):
+        return alert["second_device_id"] == device_id and alert["second_ip_address"] == ip_address
+    return alert["second_device_id"] == device_id or bool(
+        browser_fingerprint and alert.get("second_browser_fp") == browser_fingerprint
+    )
+
+
+def record_login(
+    user_id: int,
+    ip_address: str,
+    device_id: str,
+    browser_fingerprint: str = "",
+    device_name: str = "",
+    lan_mode: bool = False,
+):
+    """Store a login and return active alerts plus the newly created alert, if any.
+
+    In LAN exam mode every seat has its own IP, so a device is the pair
+    (device cookie, IP): a copied device cookie used from another seat counts
+    as a different device and raises an alert.
+    """
+    lan_ip = lan_mode and _known_ip(ip_address)
     with get_connection() as connection:
         with connection.cursor() as cursor:
-            if ip_address and browser_fingerprint:
+            if lan_ip:
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM login_events
+                    WHERE user_id = %s
+                      AND device_id = %s
+                      AND ip_address = %s
+                      AND logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
+                    LIMIT 1
+                    """,
+                    (user_id, device_id, ip_address),
+                )
+            elif ip_address and browser_fingerprint:
                 cursor.execute(
                     """
                     SELECT id
@@ -335,14 +384,26 @@ def record_login(user_id: int, ip_address: str, device_id: str, browser_fingerpr
                 current_device_alert = next(
                     (
                         alert for alert in active_alerts
-                        if alert["second_device_id"] == device_id
-                        or (browser_fingerprint and alert.get("second_browser_fp") == browser_fingerprint)
+                        if _is_same_device_alert(alert, device_id, ip_address, browser_fingerprint, lan_mode)
                     ),
                     None,
                 )
                 return active_alerts, current_device_alert
 
-            if ip_address and browser_fingerprint:
+            if lan_ip:
+                cursor.execute(
+                    """
+                    SELECT ip_address, device_id, browser_fingerprint, logged_in_at
+                    FROM login_events
+                    WHERE user_id = %s
+                      AND logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
+                      AND (device_id <> %s OR ip_address <> %s)
+                    ORDER BY logged_in_at DESC
+                    LIMIT 1
+                    """,
+                    (user_id, device_id, ip_address),
+                )
+            elif ip_address and browser_fingerprint:
                 cursor.execute(
                     """
                     SELECT ip_address, device_id, browser_fingerprint, logged_in_at
@@ -413,11 +474,31 @@ def list_login_alerts_for_user(user_id: int):
         return list_login_alerts(connection, user_id)
 
 
-def is_submission_blocked(user_id: int, device_id: str, ip_address: str = "", browser_fingerprint: str = "") -> bool:
+def is_submission_blocked(
+    user_id: int,
+    device_id: str,
+    ip_address: str = "",
+    browser_fingerprint: str = "",
+    lan_mode: bool = False,
+) -> bool:
     """Block submissions on the later-login device while a cross-device alert is active."""
     with get_connection() as connection:
         with connection.cursor() as cursor:
-            if ip_address and browser_fingerprint:
+            if lan_mode and _known_ip(ip_address):
+                # Match the later seat exactly, so a copied device cookie blocks only the copy.
+                cursor.execute(
+                    """
+                    SELECT 1
+                    FROM login_security_alerts
+                    WHERE user_id = %s
+                      AND second_device_id = %s
+                      AND second_ip_address = %s
+                      AND second_logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
+                    LIMIT 1
+                    """,
+                    (user_id, device_id, ip_address),
+                )
+            elif ip_address and browser_fingerprint:
                 cursor.execute(
                     """
                     SELECT 1
@@ -447,11 +528,36 @@ def is_submission_blocked(user_id: int, device_id: str, ip_address: str = "", br
             return cursor.fetchone() is not None
 
 
-def find_recent_other_user_on_device(user_id: int, device_id: str, ip_address: str = "", browser_fingerprint: str = ""):
-    """Return another account that used this browser/device in the last three hours."""
+def find_recent_other_user_on_device(
+    user_id: int,
+    device_id: str,
+    ip_address: str = "",
+    browser_fingerprint: str = "",
+    lan_mode: bool = False,
+):
+    """Return another account that used this browser/device in the last three hours.
+
+    Pass NO_USER_ID for a registration, where every recent account counts as another one.
+    In LAN exam mode the seat's IP alone also identifies the machine, so switching
+    browsers or clearing cookies does not allow a second account from the same seat.
+    """
     with get_connection() as connection:
         with connection.cursor() as cursor:
-            if ip_address and browser_fingerprint:
+            if lan_mode and _known_ip(ip_address):
+                cursor.execute(
+                    """
+                    SELECT users.id, users.username, login_events.ip_address, login_events.logged_in_at
+                    FROM login_events
+                    JOIN users ON users.id = login_events.user_id
+                    WHERE (login_events.device_id = %s OR login_events.ip_address = %s)
+                      AND login_events.user_id <> %s
+                      AND login_events.logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
+                    ORDER BY login_events.logged_in_at DESC
+                    LIMIT 1
+                    """,
+                    (device_id, ip_address, user_id),
+                )
+            elif ip_address and browser_fingerprint:
                 cursor.execute(
                     """
                     SELECT users.id, users.username, login_events.ip_address, login_events.logged_in_at
