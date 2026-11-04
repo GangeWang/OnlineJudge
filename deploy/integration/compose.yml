@@ -8,6 +8,9 @@ services:
       MARIADB_PASSWORD: integration-only
       HOST_BACKEND_DIR: ${PWD}/backend
       TRUSTED_PROXY_CIDRS: 172.29.247.10/32,127.0.0.1/32
+      # Pin modes so the host .env cannot change the suite; LAN mode runs on its own listener.
+      LAN_EXAM_MODE: "false"
+      ALLOW_REGISTRATION: "true"
     depends_on:
       db:
         condition: service_healthy

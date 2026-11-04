@@ -121,6 +121,7 @@ def init_db(max_attempts: int = 20, delay_seconds: float = 1.5):
                             device_id CHAR(36) NOT NULL,
                             device_name VARCHAR(253) NOT NULL DEFAULT '',
                             browser_fingerprint CHAR(64) NOT NULL DEFAULT '',
+                            raised_alert TINYINT(1) NOT NULL DEFAULT 0,
                             logged_in_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                             INDEX idx_login_events_user_time (user_id, logged_in_at),
                             INDEX idx_login_events_device_time (device_id, logged_in_at),
@@ -133,6 +134,7 @@ def init_db(max_attempts: int = 20, delay_seconds: float = 1.5):
                     )
                     cursor.execute("ALTER TABLE login_events ADD COLUMN IF NOT EXISTS device_name VARCHAR(253) NOT NULL DEFAULT '' AFTER device_id")
                     cursor.execute("ALTER TABLE login_events ADD COLUMN IF NOT EXISTS browser_fingerprint CHAR(64) NOT NULL DEFAULT ''")
+                    cursor.execute("ALTER TABLE login_events ADD COLUMN IF NOT EXISTS raised_alert TINYINT(1) NOT NULL DEFAULT 0")
                     cursor.execute("ALTER TABLE users MODIFY password_hash VARCHAR(255) NOT NULL")
                     cursor.execute(
                         """
@@ -157,6 +159,21 @@ def init_db(max_attempts: int = 20, delay_seconds: float = 1.5):
                     )
                     cursor.execute("ALTER TABLE login_security_alerts ADD COLUMN IF NOT EXISTS first_browser_fp CHAR(64) NOT NULL DEFAULT ''")
                     cursor.execute("ALTER TABLE login_security_alerts ADD COLUMN IF NOT EXISTS second_browser_fp CHAR(64) NOT NULL DEFAULT ''")
+                    # Flag logins that raised an alert before raised_alert existed. Only the
+                    # three-hour window matters; the event and its alert are written moments apart.
+                    cursor.execute(
+                        """
+                        UPDATE login_events
+                        JOIN login_security_alerts AS alerts
+                          ON alerts.user_id = login_events.user_id
+                         AND alerts.second_device_id = login_events.device_id
+                         AND alerts.second_ip_address = login_events.ip_address
+                         AND ABS(TIMESTAMPDIFF(SECOND, alerts.second_logged_in_at, login_events.logged_in_at)) <= 5
+                        SET login_events.raised_alert = 1
+                        WHERE login_events.raised_alert = 0
+                          AND login_events.logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
+                        """
+                    )
                     cursor.execute(
                         """
                             CREATE TABLE IF NOT EXISTS submissions (
@@ -434,10 +451,10 @@ def record_login(
             new_alert = None
             cursor.execute(
                 """
-                INSERT INTO login_events (user_id, ip_address, device_id, browser_fingerprint, device_name)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO login_events (user_id, ip_address, device_id, browser_fingerprint, device_name, raised_alert)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 """,
-                (user_id, ip_address, device_id, browser_fingerprint, device_name),
+                (user_id, ip_address, device_id, browser_fingerprint, device_name, previous_login is not None),
             )
             if previous_login:
                 new_alert = {
@@ -540,6 +557,9 @@ def find_recent_other_user_on_device(
     Pass NO_USER_ID for a registration, where every recent account counts as another one.
     In LAN exam mode the seat's IP alone also identifies the machine, so switching
     browsers or clearing cookies does not allow a second account from the same seat.
+
+    Logins that raised a cross-device alert do not count: that device cannot submit for
+    the account anyway, and counting it would lock the seat out of its own account.
     """
     with get_connection() as connection:
         with connection.cursor() as cursor:
@@ -551,6 +571,7 @@ def find_recent_other_user_on_device(
                     JOIN users ON users.id = login_events.user_id
                     WHERE (login_events.device_id = %s OR login_events.ip_address = %s)
                       AND login_events.user_id <> %s
+                      AND login_events.raised_alert = 0
                       AND login_events.logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
                     ORDER BY login_events.logged_in_at DESC
                     LIMIT 1
@@ -568,6 +589,7 @@ def find_recent_other_user_on_device(
                         OR (login_events.ip_address = %s AND login_events.browser_fingerprint = %s AND login_events.browser_fingerprint <> '')
                     )
                       AND login_events.user_id <> %s
+                      AND login_events.raised_alert = 0
                       AND login_events.logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
                     ORDER BY login_events.logged_in_at DESC
                     LIMIT 1
@@ -582,6 +604,7 @@ def find_recent_other_user_on_device(
                     JOIN users ON users.id = login_events.user_id
                     WHERE login_events.device_id = %s
                       AND login_events.user_id <> %s
+                      AND login_events.raised_alert = 0
                       AND login_events.logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
                     ORDER BY login_events.logged_in_at DESC
                     LIMIT 1

@@ -117,6 +117,13 @@ if s==429:
     time.sleep(min(int(h['Retry-After'])+1,60))
     s,b,h=other.call('/submit',dict(submit,problem_id='1001'))
 check('expired alert no longer blocks submission',s==200,(s,b))
+# A login that raised a cross-device alert must not lock that device out of its own account.
+flagged=Client(); s,b,_=login(flagged,u)
+check('alerted login on a new device',s==200 and b.get('login_alert') is not None,b)
+check('alerted login is flagged',scalar('SELECT raised_alert FROM login_events WHERE user_id=%s ORDER BY id DESC LIMIT 1',(uid,))==1)
+own='it_'+uuid.uuid4().hex[:14]
+s,b,_=flagged.call('/register',{'username':own,'password':'integration-password'})
+check('device with only an alerted login can register its own account',s==200,(s,b))
 # Exercise actual application startup and HTTP Secure cookies on a separate listener.
 for secret in ['', 'short']:
     env=dict(os.environ,DEVICE_SECRET=secret)
@@ -167,6 +174,11 @@ try:
     s,b,_=seat11.call('/session'); check('LAN: original seat sees no warning',s==200 and b['user']['id']==laid and b['login_alerts']==[],b)
     s,b,_=clone.call('/session'); check('LAN: copied seat keeps its warning',s==200 and bool(b['login_alerts']),b)
     s,b,_=login(seat11,la); check('LAN: relogin on the original seat raises no alert',s==200 and b['login_alert'] is None,b)
+    # The alerted login of la on seat 15 must not keep seat 15 from its own account.
+    seat15=Client(base=lan,ip='10.20.0.15'); s,b,_=login(seat15,la)
+    check('LAN: login of an account already in use elsewhere is alerted',s==200 and b.get('login_alert') is not None,b)
+    s,b,_=seat15.call('/register',{'username':'it_'+uuid.uuid4().hex[:14],'password':'integration-password'})
+    check('LAN: seat with only an alerted login can register its own account',s==200,(s,b))
 finally:
     p.terminate(); p.wait(timeout=10)
 print(json.dumps({'passed':sum(r[1] for r in results),'failed':sum(not r[1] for r in results)},ensure_ascii=False))
