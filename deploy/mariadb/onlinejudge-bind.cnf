@@ -1,0 +1,12 @@
+# MariaDB server option for the OJ host. Copy into the server's include directory, e.g.
+#   Homebrew (Apple Silicon): /opt/homebrew/etc/my.cnf.d/
+#   Debian/Ubuntu:            /etc/mysql/mariadb.conf.d/
+# then restart MariaDB. Without this file MariaDB listens on every interface (*:3306),
+# which exposes the database to the exam LAN.
+#
+# Docker Desktop (macOS/Windows) forwards host.docker.internal to the host's loopback,
+# so the backend container can still connect (verified 2026-11-04 on macOS Docker
+# Desktop 29.9.2; MariaDB sees the container as 'user'@'localhost'). On Linux Docker, host.docker.internal is
+# the bridge gateway instead; see README "MariaDB 只允許本機連線" for that case.
+[mysqld]
+bind-address = 127.0.0.1

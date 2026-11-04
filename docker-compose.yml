@@ -9,11 +9,11 @@ services:
       - "127.0.0.1:8000:8000"
     environment:
       - HOST_BACKEND_DIR=${HOST_BACKEND_DIR:-${PWD}/backend}
-      - MARIADB_HOST=host.docker.internal
-      - MARIADB_PORT=3306
-      - MARIADB_USER=onlinejudge
-      - MARIADB_PASSWORD=onlinejudge
-      - MARIADB_DATABASE=onlinejudge
+      - MARIADB_HOST=${MARIADB_HOST:-host.docker.internal}
+      - MARIADB_PORT=${MARIADB_PORT:-3306}
+      - MARIADB_USER=${MARIADB_USER:?Set MARIADB_USER in .env}
+      - MARIADB_PASSWORD=${MARIADB_PASSWORD:?Set MARIADB_PASSWORD in .env to a random value of at least 16 characters}
+      - MARIADB_DATABASE=${MARIADB_DATABASE:-onlinejudge}
       - DEVICE_SECRET=${DEVICE_SECRET:?Set DEVICE_SECRET to a random value of at least 32 bytes}
       # The bundled Nginx example serves HTTP. Set this to true when TLS is enabled.
       - COOKIE_SECURE=${COOKIE_SECURE:-false}

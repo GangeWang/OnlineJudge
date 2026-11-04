@@ -12,16 +12,31 @@ from argon2.exceptions import VerifyMismatchError, VerificationError
 import pymysql
 from pymysql.cursors import DictCursor
 
-DB_CONFIG = {
-    "host": os.getenv("MARIADB_HOST", "host.docker.internal"),
-    "port": int(os.getenv("MARIADB_PORT", "3306")),
-    "user": os.getenv("MARIADB_USER", "onlinejudge"),
-    "password": os.getenv("MARIADB_PASSWORD", "onlinejudge"),
-    "database": os.getenv("MARIADB_DATABASE", "onlinejudge"),
-    "charset": "utf8mb4",
-    "cursorclass": DictCursor,
-    "autocommit": True,
-}
+MIN_DB_PASSWORD_CHARS = 16
+# Passwords that were once published in this repository; they must never be accepted again.
+PUBLISHED_DB_PASSWORDS = frozenset({"onlinejudge"})
+
+
+def db_config() -> dict:
+    """Return MariaDB connection settings; credentials must come from the environment."""
+    user = os.getenv("MARIADB_USER", "").strip()
+    password = os.getenv("MARIADB_PASSWORD", "")
+    if not user:
+        raise RuntimeError("MARIADB_USER must be set")
+    if len(password) < MIN_DB_PASSWORD_CHARS or password in PUBLISHED_DB_PASSWORDS:
+        raise RuntimeError(
+            f"MARIADB_PASSWORD must be set to a non-default value of at least {MIN_DB_PASSWORD_CHARS} characters"
+        )
+    return {
+        "host": os.getenv("MARIADB_HOST", "host.docker.internal"),
+        "port": int(os.getenv("MARIADB_PORT", "3306")),
+        "user": user,
+        "password": password,
+        "database": os.getenv("MARIADB_DATABASE", "onlinejudge"),
+        "charset": "utf8mb4",
+        "cursorclass": DictCursor,
+        "autocommit": True,
+    }
 
 
 PASSWORD_HASHER = PasswordHasher()
@@ -37,7 +52,7 @@ def hash_session_token(token: str) -> str:
 
 @contextmanager
 def get_connection():
-    connection = pymysql.connect(**DB_CONFIG)
+    connection = pymysql.connect(**db_config())
     try:
         yield connection
     finally:

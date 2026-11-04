@@ -48,8 +48,8 @@ OnlineJudge/
 | `HOST_BACKEND_DIR` | 主機上的 backend 絕對路徑 | `${PWD}/backend`          |
 | `MARIADB_HOST`     | MariaDB 主機位置      | `host.docker.internal`    |
 | `MARIADB_PORT`     | MariaDB 埠號        | `3306`                    |
-| `MARIADB_USER`     | 資料庫使用者            | `onlinejudge`             |
-| `MARIADB_PASSWORD` | 資料庫密碼             | `onlinejudge`             |
+| `MARIADB_USER`     | 資料庫使用者            | **必填，無預設值**              |
+| `MARIADB_PASSWORD` | 資料庫密碼（至少 16 字元） | **必填，無預設值**              |
 | `MARIADB_DATABASE` | 資料庫名稱             | `onlinejudge`             |
 | `DEVICE_SECRET`    | 裝置 Cookie 的 HMAC 密鑰（至少 32 bytes） | **必填，無預設值** |
 | `COOKIE_SECURE`    | 是否只透過 HTTPS 傳送 Cookie | `true` |
@@ -60,13 +60,15 @@ OnlineJudge/
 ```env
 HOST_BACKEND_DIR=${HOST_BACKEND_DIR:-${PWD}/backend}
 
-MARIADB_HOST=host.docker.internal
-MARIADB_PORT=3306
-MARIADB_USER=onlinejudge
-MARIADB_PASSWORD=onlinejudge
-MARIADB_DATABASE=onlinejudge
+MARIADB_HOST=${MARIADB_HOST:-host.docker.internal}
+MARIADB_PORT=${MARIADB_PORT:-3306}
+MARIADB_USER=<.env 中的資料庫帳號>
+MARIADB_PASSWORD=<.env 中至少 16 字元的隨機密碼>
+MARIADB_DATABASE=${MARIADB_DATABASE:-onlinejudge}
 DEVICE_SECRET=<至少 32 bytes 的隨機密鑰>
 ```
+
+`MARIADB_USER`、`MARIADB_PASSWORD` 與 `DEVICE_SECRET` 一樣沒有預設值：未設定、短於 16 字元，或使用本專案過去公開過的預設密碼時，Compose 或後端會直接拒絕啟動。可使用 `openssl rand -hex 24` 產生資料庫密碼。
 
 可使用 `openssl rand -hex 32` 產生 `DEVICE_SECRET`。請勿提交此密鑰，且所有後端實例必須使用相同值。若目前只使用範例中的 HTTP Nginx，需明確設定 `COOKIE_SECURE=false`；啟用 TLS 後應改回 `true`。
 
@@ -157,7 +159,7 @@ cd backend
 pip install -r requirements.txt
 ```
 
-啟動 FastAPI：
+啟動 FastAPI（需先在環境中設定 `DEVICE_SECRET`、`MARIADB_USER`、`MARIADB_PASSWORD`，本機 MariaDB 通常另設 `MARIADB_HOST=127.0.0.1`）：
 
 ```bash
 uvicorn main:app --reload --host 0.0.0.0 --port 8000 --no-proxy-headers
@@ -178,11 +180,46 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000 --no-proxy-headers
 
 | 項目       | 設定                     |
 | -------- | ---------------------- |
-| Database | `onlinejudge`          |
-| User     | `onlinejudge`          |
-| Password | `onlinejudge`          |
+| Database | `onlinejudge`（可用 `MARIADB_DATABASE` 變更） |
+| User     | `.env` 的 `MARIADB_USER` |
+| Password | `.env` 的 `MARIADB_PASSWORD`（隨機產生，勿提交） |
 | Host     | `host.docker.internal` |
 | Port     | `3306`                 |
+
+## 5.1 MariaDB 只允許本機連線
+
+MariaDB 預設監聽所有網卡（`*:3306`）。考場內任何電腦都能直接連線資料庫，讀取所有人的程式碼或竄改成績、刪除異地登入紀錄。部署時必須：
+
+1. **只綁定 loopback**：把 `deploy/mariadb/onlinejudge-bind.cnf`（內容為 `bind-address = 127.0.0.1`）複製到 MariaDB 的設定引入目錄後重新啟動，例如 Homebrew（Apple Silicon）：
+
+   ```bash
+   cp deploy/mariadb/onlinejudge-bind.cnf /opt/homebrew/etc/my.cnf.d/
+   brew services restart mariadb
+   ```
+
+   Docker Desktop（macOS／Windows）會把容器連往 `host.docker.internal` 的流量轉到主機的 loopback，所以後端容器仍可連線。2026-11-04 在 macOS Docker Desktop 29.9.2 上實測：主機開一個只綁 `127.0.0.1` 的暫時服務，從預設 bridge 和自訂網路（等同 Compose 預設網路）的容器連 `host.docker.internal`（解析為 `192.168.65.254`）都能連上，主機端看到的來源是 `127.0.0.1`；MariaDB 則把這個來源認成 `'<user>'@'localhost'`。
+
+2. **帳號只允許本機來源，並換成隨機密碼**（以 root 登入 MariaDB 執行；`<新密碼>` 換成 `.env` 中的值）。不要使用 `%`。容器連線在 MariaDB 會被認成 `localhost`；另外建立 `127.0.0.1`，是為了將來啟用 `skip-name-resolve` 時仍能連線：
+
+   ```sql
+   SELECT user, host FROM mysql.user WHERE user = 'onlinejudge';
+   -- 若有 host = '%' 或考場網段的帳號，先移除：
+   DROP USER IF EXISTS 'onlinejudge'@'%';
+   CREATE USER IF NOT EXISTS 'onlinejudge'@'localhost' IDENTIFIED BY '<新密碼>';
+   CREATE USER IF NOT EXISTS 'onlinejudge'@'127.0.0.1' IDENTIFIED BY '<新密碼>';
+   ALTER USER 'onlinejudge'@'localhost' IDENTIFIED BY '<新密碼>';
+   ALTER USER 'onlinejudge'@'127.0.0.1' IDENTIFIED BY '<新密碼>';
+   GRANT ALL PRIVILEGES ON onlinejudge.* TO 'onlinejudge'@'localhost', 'onlinejudge'@'127.0.0.1';
+   ```
+
+3. **驗證**：`lsof -nP -iTCP:3306 -sTCP:LISTEN` 應只顯示 `127.0.0.1:3306`；從另一台區網電腦連 `<OJ 主機 IP>:3306` 應被拒絕；後端重建（`docker compose up -d --no-deps backend`）後可正常登入與提交。
+
+4. **如果綁定 127.0.0.1 之後，後端容器連不上資料庫**（例如 Docker Desktop 的網路設定不同，或改用其他 Docker 執行環境），先執行 `docker compose logs backend` 確認錯誤，再擇一處理，**不要**改回對所有網卡開放又不加限制：
+   * 把 `bind-address` 改成考場網段以外的位址，例如只給 Docker 使用的介面位址。之後要再用 `lsof` 確認 3306 沒有出現在考場網卡的 IP 上，帳號 host 也要改成對應的來源，同樣不要用 `%`。
+   * 暫時保留原本的綁定，改用 macOS 的 `pf` 防火牆擋掉考場網卡進來的 3306。內建的「應用程式防火牆」無法依埠號阻擋，所以要用 `pf`。先用 `ifconfig` 確認考場網卡名稱（例如 `en0`），然後在 `/etc/pf.conf` 末尾加入 `block in quick on en0 proto tcp from any to any port 3306`，再執行 `sudo pfctl -f /etc/pf.conf && sudo pfctl -e`。最後從另一台區網電腦確認 3306 連不上。
+   * 兩種做法都要搭配第 2 步的帳號 host 限制和新密碼。
+
+舊的 `onlinejudge` 預設密碼已存在 git 歷史中，視為公開；後端會拒絕使用它。
 
 範例：
 
@@ -203,17 +240,13 @@ Linux Docker 預設可能無法解析：
 host.docker.internal
 ```
 
-若連線失敗，可以：
+若連線失敗，**不要**改成主機的區網 IP（那需要讓 MariaDB 對考場網段開放）。可以：
 
-1. 改成主機實際 IP：
-
-```env
-MARIADB_HOST=192.168.x.x
-```
+1. 在 `docker-compose.yml` 的 `backend` 加上 `extra_hosts: ["host.docker.internal:host-gateway"]`，並讓 MariaDB 只綁定 Docker bridge 閘道 IP（例如 `bind-address = 172.17.0.1`，依 `docker network inspect bridge` 實際值），帳號 host 只允許該 Docker 網段；主機防火牆仍需阻擋考場網段連 3306。
 
 或
 
-2. 將 MariaDB 加入同一份 `docker-compose.yml`，改用服務名稱連線。
+2. 將 MariaDB 加入同一份 `docker-compose.yml`，改用服務名稱連線，且**不要**發布 3306 埠（不寫 `ports:`）。
 
 ---
 
@@ -288,7 +321,7 @@ Linux 若使用：
 MARIADB_HOST=host.docker.internal
 ```
 
-失敗，請改用主機 IP。
+失敗，請依「Linux 環境注意事項」改用 Docker bridge 閘道或 Compose 內部 MariaDB，不要改用主機區網 IP。
 
 ---
 

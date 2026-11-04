@@ -19,6 +19,7 @@ from database import (
     authenticate_user,
     create_user,
     create_session,
+    db_config,
     find_recent_other_user_on_device,
     get_session,
     init_db,
@@ -35,6 +36,7 @@ from database import (
 async def lifespan(app: FastAPI):
     # Fail closed at startup instead of silently signing cookies with a public key.
     _device_secret()
+    db_config()
     configured_device_names()
     init_db()
     yield

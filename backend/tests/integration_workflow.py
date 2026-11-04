@@ -102,6 +102,10 @@ for secret in ['', 'short']:
     env=dict(os.environ,DEVICE_SECRET=secret)
     p=subprocess.run(['uvicorn','main:app','--port','18001'],env=env,capture_output=True,text=True,timeout=15)
     check('startup refuses '+('missing' if not secret else 'short')+' secret',p.returncode!=0 and 'DEVICE_SECRET must be set' in p.stderr)
+for db_password in ['', 'onlinejudge']:
+    env=dict(os.environ,MARIADB_PASSWORD=db_password)
+    p=subprocess.run(['uvicorn','main:app','--port','18001'],env=env,capture_output=True,text=True,timeout=15)
+    check('startup refuses '+('missing' if not db_password else 'published default')+' database password',p.returncode!=0 and 'MARIADB_PASSWORD must be set' in p.stderr)
 p=subprocess.Popen(['uvicorn','main:app','--host','127.0.0.1','--port','18001'],env=dict(os.environ,COOKIE_SECURE='true'),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 try:
     c=Client(base='http://127.0.0.1:18001')

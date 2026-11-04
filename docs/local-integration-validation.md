@@ -35,10 +35,12 @@ From the repository root, with Docker, Compose and `onlineoj-sandbox:latest` ava
 
 ```sh
 export DEVICE_SECRET="$(openssl rand -hex 32)"
+# Required by docker-compose.yml interpolation; the integration override supplies its own test-only values.
+export MARIADB_USER=onlinejudge MARIADB_PASSWORD=integration-only
 docker compose -p onlineoj-integration -f docker-compose.yml -f deploy/integration/compose.yml up -d --build backend nginx
 docker compose -p onlineoj-integration -f docker-compose.yml -f deploy/integration/compose.yml exec -T -e OJ_INTEGRATION_TEST=1 backend python tests/integration_workflow.py
 docker compose -p onlineoj-integration -f docker-compose.yml -f deploy/integration/compose.yml down --volumes
-unset DEVICE_SECRET
+unset DEVICE_SECRET MARIADB_USER MARIADB_PASSWORD
 ```
 
 The override uses loopback ports 18000/18080, a separate Compose network, a tmpfs database, explicit proxy trust and test-only database credentials. Ensure subnet `172.29.247.0/24` is available. All test API requests run inside the backend container. The script refuses execution unless `OJ_INTEGRATION_TEST=1` and the database host is `db`.
