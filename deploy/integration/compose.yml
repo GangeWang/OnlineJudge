@@ -11,6 +11,7 @@ services:
       # Pin modes so the host .env cannot change the suite; LAN mode runs on its own listener.
       LAN_EXAM_MODE: "false"
       ALLOW_REGISTRATION: "true"
+      ADMIN_USERNAMES: ""
     depends_on:
       db:
         condition: service_healthy

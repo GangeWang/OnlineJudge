@@ -5,7 +5,7 @@ import re
 from difflib import SequenceMatcher
 from contextlib import contextmanager
 from datetime import datetime
-from time import sleep
+from time import sleep, time as epoch_now
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, VerificationError
@@ -15,6 +15,16 @@ from pymysql.cursors import DictCursor
 MIN_DB_PASSWORD_CHARS = 16
 # AUTO_INCREMENT ids start at 1, so 0 never matches an account.
 NO_USER_ID = 0
+# Anti-cheat window when the caller gives none (practice mode).
+DEFAULT_WINDOW_SECONDS = 3 * 3600
+
+
+def _window_since(since: float | None) -> float:
+    """Epoch seconds (UTC) from which logins and alerts count; defaults to the last three hours.
+
+    Compared with UNIX_TIMESTAMP(column), which does not depend on the database time zone.
+    """
+    return since if since is not None else epoch_now() - DEFAULT_WINDOW_SECONDS
 # Passwords that were once published in this repository; they must never be accepted again.
 PUBLISHED_DB_PASSWORDS = frozenset({"onlinejudge"})
 
@@ -195,6 +205,17 @@ def init_db(max_attempts: int = 20, delay_seconds: float = 1.5):
                             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
                         """
                     )
+                    cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS exam_settings (
+                            id TINYINT PRIMARY KEY,
+                            start_at DATETIME NULL COMMENT 'UTC',
+                            end_at DATETIME NULL COMMENT 'UTC',
+                            updated_by VARCHAR(64) NOT NULL DEFAULT '',
+                            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                        """
+                    )
                     cursor.execute("ALTER TABLE submissions ADD COLUMN IF NOT EXISTS source_code MEDIUMTEXT NULL")
                     cursor.execute("ALTER TABLE submissions ADD COLUMN IF NOT EXISTS source_hash CHAR(64) NULL")
             return
@@ -283,6 +304,14 @@ def get_session(token: str):
             return cursor.fetchone()
 
 
+def delete_session(token: str):
+    if not token:
+        return
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM sessions WHERE token_hash = %s", (hash_session_token(token),))
+
+
 def record_submission_attempt(user_id: int, problem_id: str):
     with get_connection() as connection:
         with connection.cursor() as cursor:
@@ -335,13 +364,18 @@ def record_login(
     browser_fingerprint: str = "",
     device_name: str = "",
     lan_mode: bool = False,
+    raise_alerts: bool = True,
+    since: float | None = None,
 ):
     """Store a login and return active alerts plus the newly created alert, if any.
+
+    raise_alerts=False (administrators) records the login without cross-device alerts.
 
     In LAN exam mode every seat has its own IP, so a device is the pair
     (device cookie, IP): a copied device cookie used from another seat counts
     as a different device and raises an alert.
     """
+    since = _window_since(since)
     lan_ip = lan_mode and _known_ip(ip_address)
     with get_connection() as connection:
         with connection.cursor() as cursor:
@@ -353,10 +387,10 @@ def record_login(
                     WHERE user_id = %s
                       AND device_id = %s
                       AND ip_address = %s
-                      AND logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
+                      AND UNIX_TIMESTAMP(logged_in_at) >= %s
                     LIMIT 1
                     """,
-                    (user_id, device_id, ip_address),
+                    (user_id, device_id, ip_address, since),
                 )
             elif ip_address and browser_fingerprint:
                 cursor.execute(
@@ -368,10 +402,10 @@ def record_login(
                           device_id = %s
                           OR (ip_address = %s AND browser_fingerprint = %s AND browser_fingerprint <> '')
                       )
-                      AND logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
+                      AND UNIX_TIMESTAMP(logged_in_at) >= %s
                     LIMIT 1
                     """,
-                    (user_id, device_id, ip_address, browser_fingerprint),
+                    (user_id, device_id, ip_address, browser_fingerprint, since),
                 )
             else:
                 cursor.execute(
@@ -380,10 +414,10 @@ def record_login(
                     FROM login_events
                     WHERE user_id = %s
                       AND device_id = %s
-                      AND logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
+                      AND UNIX_TIMESTAMP(logged_in_at) >= %s
                     LIMIT 1
                     """,
-                    (user_id, device_id),
+                    (user_id, device_id, since),
                 )
             recent_login = cursor.fetchone()
             if recent_login:
@@ -397,7 +431,7 @@ def record_login(
                 # A page reload or re-login from the same browser/device signs in again.
                 # Do not create another event. Keep the alert visible only on
                 # the later device that originally caused the alert.
-                active_alerts = list_login_alerts(connection, user_id)
+                active_alerts = list_login_alerts(connection, user_id, since)
                 current_device_alert = next(
                     (
                         alert for alert in active_alerts
@@ -413,12 +447,12 @@ def record_login(
                     SELECT ip_address, device_id, browser_fingerprint, logged_in_at
                     FROM login_events
                     WHERE user_id = %s
-                      AND logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
+                      AND UNIX_TIMESTAMP(logged_in_at) >= %s
                       AND (device_id <> %s OR ip_address <> %s)
                     ORDER BY logged_in_at DESC
                     LIMIT 1
                     """,
-                    (user_id, device_id, ip_address),
+                    (user_id, since, device_id, ip_address),
                 )
             elif ip_address and browser_fingerprint:
                 cursor.execute(
@@ -426,13 +460,13 @@ def record_login(
                     SELECT ip_address, device_id, browser_fingerprint, logged_in_at
                     FROM login_events
                     WHERE user_id = %s
-                      AND logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
+                      AND UNIX_TIMESTAMP(logged_in_at) >= %s
                       AND device_id <> %s
                       AND (ip_address <> %s OR browser_fingerprint <> %s)
                     ORDER BY logged_in_at DESC
                     LIMIT 1
                     """,
-                    (user_id, device_id, ip_address, browser_fingerprint),
+                    (user_id, since, device_id, ip_address, browser_fingerprint),
                 )
             else:
                 cursor.execute(
@@ -440,14 +474,14 @@ def record_login(
                     SELECT ip_address, device_id, browser_fingerprint, logged_in_at
                     FROM login_events
                     WHERE user_id = %s
-                      AND logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
+                      AND UNIX_TIMESTAMP(logged_in_at) >= %s
                       AND device_id <> %s
                     ORDER BY logged_in_at DESC
                     LIMIT 1
                     """,
-                    (user_id, device_id),
+                    (user_id, since, device_id),
                 )
-            previous_login = cursor.fetchone()
+            previous_login = cursor.fetchone() if raise_alerts else None
             new_alert = None
             cursor.execute(
                 """
@@ -483,12 +517,12 @@ def record_login(
                         new_alert["second_browser_fp"],
                     ),
                 )
-        return list_login_alerts(connection, user_id), new_alert
+        return list_login_alerts(connection, user_id, since), new_alert
 
 
-def list_login_alerts_for_user(user_id: int):
+def list_login_alerts_for_user(user_id: int, since: float | None = None):
     with get_connection() as connection:
-        return list_login_alerts(connection, user_id)
+        return list_login_alerts(connection, user_id, since)
 
 
 def is_submission_blocked(
@@ -497,8 +531,10 @@ def is_submission_blocked(
     ip_address: str = "",
     browser_fingerprint: str = "",
     lan_mode: bool = False,
+    since: float | None = None,
 ) -> bool:
     """Block submissions on the later-login device while a cross-device alert is active."""
+    since = _window_since(since)
     with get_connection() as connection:
         with connection.cursor() as cursor:
             if lan_mode and _known_ip(ip_address):
@@ -510,10 +546,10 @@ def is_submission_blocked(
                     WHERE user_id = %s
                       AND second_device_id = %s
                       AND second_ip_address = %s
-                      AND second_logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
+                      AND UNIX_TIMESTAMP(second_logged_in_at) >= %s
                     LIMIT 1
                     """,
-                    (user_id, device_id, ip_address),
+                    (user_id, device_id, ip_address, since),
                 )
             elif ip_address and browser_fingerprint:
                 cursor.execute(
@@ -525,10 +561,10 @@ def is_submission_blocked(
                           second_device_id = %s
                           OR (second_ip_address = %s AND second_browser_fp = %s AND second_browser_fp <> '')
                       )
-                      AND second_logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
+                      AND UNIX_TIMESTAMP(second_logged_in_at) >= %s
                     LIMIT 1
                     """,
-                    (user_id, device_id, ip_address, browser_fingerprint),
+                    (user_id, device_id, ip_address, browser_fingerprint, since),
                 )
             else:
                 cursor.execute(
@@ -537,10 +573,10 @@ def is_submission_blocked(
                     FROM login_security_alerts
                     WHERE user_id = %s
                       AND second_device_id = %s
-                      AND second_logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
+                      AND UNIX_TIMESTAMP(second_logged_in_at) >= %s
                     LIMIT 1
                     """,
-                    (user_id, device_id),
+                    (user_id, device_id, since),
                 )
             return cursor.fetchone() is not None
 
@@ -551,6 +587,8 @@ def find_recent_other_user_on_device(
     ip_address: str = "",
     browser_fingerprint: str = "",
     lan_mode: bool = False,
+    ignore_usernames=(),
+    since: float | None = None,
 ):
     """Return another account that used this browser/device in the last three hours.
 
@@ -560,61 +598,46 @@ def find_recent_other_user_on_device(
 
     Logins that raised a cross-device alert do not count: that device cannot submit for
     the account anyway, and counting it would lock the seat out of its own account.
+    Logins of ignore_usernames (administrators) do not count either.
     """
+    since = _window_since(since)
+    if lan_mode and _known_ip(ip_address):
+        same_device = "(login_events.device_id = %s OR login_events.ip_address = %s)"
+        params = [device_id, ip_address]
+    elif ip_address and browser_fingerprint:
+        same_device = (
+            "(login_events.device_id = %s OR (login_events.ip_address = %s "
+            "AND login_events.browser_fingerprint = %s AND login_events.browser_fingerprint <> ''))"
+        )
+        params = [device_id, ip_address, browser_fingerprint]
+    else:
+        same_device = "login_events.device_id = %s"
+        params = [device_id]
+    ignored = sorted(ignore_usernames)
+    # The username column's collation is case-insensitive, matching how accounts are unique.
+    ignore_clause = f"AND users.username NOT IN ({', '.join(['%s'] * len(ignored))})" if ignored else ""
     with get_connection() as connection:
         with connection.cursor() as cursor:
-            if lan_mode and _known_ip(ip_address):
-                cursor.execute(
-                    """
-                    SELECT users.id, users.username, login_events.ip_address, login_events.logged_in_at
-                    FROM login_events
-                    JOIN users ON users.id = login_events.user_id
-                    WHERE (login_events.device_id = %s OR login_events.ip_address = %s)
-                      AND login_events.user_id <> %s
-                      AND login_events.raised_alert = 0
-                      AND login_events.logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
-                    ORDER BY login_events.logged_in_at DESC
-                    LIMIT 1
-                    """,
-                    (device_id, ip_address, user_id),
-                )
-            elif ip_address and browser_fingerprint:
-                cursor.execute(
-                    """
-                    SELECT users.id, users.username, login_events.ip_address, login_events.logged_in_at
-                    FROM login_events
-                    JOIN users ON users.id = login_events.user_id
-                    WHERE (
-                        login_events.device_id = %s
-                        OR (login_events.ip_address = %s AND login_events.browser_fingerprint = %s AND login_events.browser_fingerprint <> '')
-                    )
-                      AND login_events.user_id <> %s
-                      AND login_events.raised_alert = 0
-                      AND login_events.logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
-                    ORDER BY login_events.logged_in_at DESC
-                    LIMIT 1
-                    """,
-                    (device_id, ip_address, browser_fingerprint, user_id),
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT users.id, users.username, login_events.ip_address, login_events.logged_in_at
-                    FROM login_events
-                    JOIN users ON users.id = login_events.user_id
-                    WHERE login_events.device_id = %s
-                      AND login_events.user_id <> %s
-                      AND login_events.raised_alert = 0
-                      AND login_events.logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
-                    ORDER BY login_events.logged_in_at DESC
-                    LIMIT 1
-                    """,
-                    (device_id, user_id),
-                )
+            cursor.execute(
+                f"""
+                SELECT users.id, users.username, login_events.ip_address, login_events.logged_in_at
+                FROM login_events
+                JOIN users ON users.id = login_events.user_id
+                WHERE {same_device}
+                  AND login_events.user_id <> %s
+                  AND login_events.raised_alert = 0
+                  AND UNIX_TIMESTAMP(login_events.logged_in_at) >= %s
+                  {ignore_clause}
+                ORDER BY login_events.logged_in_at DESC
+                LIMIT 1
+                """,
+                (*params, user_id, since, *ignored),
+            )
             return cursor.fetchone()
 
 
-def list_login_alerts(connection, user_id: int):
+def list_login_alerts(connection, user_id: int, since: float | None = None):
+    since = _window_since(since)
     with connection.cursor() as cursor:
         cursor.execute(
             """
@@ -622,10 +645,10 @@ def list_login_alerts(connection, user_id: int):
                    second_ip_address, second_device_id, second_browser_fp, second_logged_in_at
             FROM login_security_alerts
             WHERE user_id = %s
-              AND second_logged_in_at >= CURRENT_TIMESTAMP() - INTERVAL 3 HOUR
+              AND UNIX_TIMESTAMP(second_logged_in_at) >= %s
             ORDER BY second_logged_in_at DESC, id DESC
             """,
-            (user_id,),
+            (user_id, since),
         )
         alerts = cursor.fetchall()
     for alert in alerts:
@@ -704,3 +727,35 @@ def list_submissions(user_id: int):
         if isinstance(submitted_at, datetime):
             row["submitted_at"] = submitted_at.isoformat()
     return rows
+
+
+EXAM_SETTINGS_ID = 1
+
+
+def get_exam_schedule() -> dict:
+    """Return the exam window as naive UTC datetimes; both None means no exam is scheduled."""
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT start_at, end_at, updated_by, updated_at FROM exam_settings WHERE id = %s",
+                (EXAM_SETTINGS_ID,),
+            )
+            row = cursor.fetchone()
+    if not row:
+        return {"start_at": None, "end_at": None, "updated_by": "", "updated_at": None}
+    return row
+
+
+def set_exam_schedule(start_at: datetime | None, end_at: datetime | None, updated_by: str):
+    """Store the exam window (naive UTC datetimes), or clear it with two Nones."""
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO exam_settings (id, start_at, end_at, updated_by)
+                VALUES (%s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE start_at = VALUES(start_at), end_at = VALUES(end_at),
+                                        updated_by = VALUES(updated_by)
+                """,
+                (EXAM_SETTINGS_ID, start_at, end_at, updated_by),
+            )

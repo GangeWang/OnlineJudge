@@ -225,3 +225,76 @@ td {
     border-bottom: 1px solid var(--border);
     text-align: left;
 }
+
+.exam-banner {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    align-items: baseline;
+    padding: 10px 14px;
+    margin-bottom: 16px;
+    border: 1px solid;
+    border-radius: 8px;
+}
+
+.exam-not_started {
+    border-color: #2563eb;
+    background: #eff6ff;
+    color: #1e3a8a;
+}
+
+.exam-running {
+    border-color: #16a34a;
+    background: #f0fdf4;
+    color: #14532d;
+}
+
+.exam-ended {
+    border-color: #6b7280;
+    background: #f3f4f6;
+    color: #374151;
+}
+
+.admin-panel {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 16px;
+    background: #fafafa;
+}
+
+.admin-panel h2 {
+    margin: 0 0 6px;
+    font-size: 18px;
+}
+
+.admin-hint {
+    margin: 0 0 12px;
+    color: #4b5563;
+    font-size: 14px;
+}
+
+.admin-fields {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.admin-fields label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 14px;
+}
+
+.admin-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.problems-message {
+    margin: 0 0 16px;
+    color: #92400e;
+}

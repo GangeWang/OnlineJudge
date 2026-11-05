@@ -1,5 +1,6 @@
 """Run inside the isolated backend container; uses its temporary MariaDB only."""
 import os, json, uuid, hmac, hashlib, subprocess, time
+from datetime import datetime, timedelta, timezone
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -7,7 +8,7 @@ from http.cookies import SimpleCookie
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from database import get_connection
+from database import create_user, get_connection
 
 assert os.environ.get('OJ_INTEGRATION_TEST') == '1', 'Requires explicit isolated integration environment'
 assert os.environ.get('MARIADB_HOST') == 'db', 'Never run against the host database'
@@ -124,6 +125,16 @@ check('alerted login is flagged',scalar('SELECT raised_alert FROM login_events W
 own='it_'+uuid.uuid4().hex[:14]
 s,b,_=flagged.call('/register',{'username':own,'password':'integration-password'})
 check('device with only an alerted login can register its own account',s==200,(s,b))
+# Logout ends this browser's session but keeps the device identity and login history.
+lo=Client(); lou,louid,_=register(lo)
+token=lo.cookies['oj_session']; device=lo.cookies['oj_device']
+s,b,_=lo.call('/logout',{}); check('logout succeeds',s==200 and b=={'ok':True},(s,b))
+check('logout deletes the session row',scalar('SELECT COUNT(*) FROM sessions WHERE user_id=%s',(louid,))==0)
+check('logout keeps the device cookie',lo.cookies.get('oj_device')==device)
+lo.cookies['oj_session']=token
+s,b,_=lo.call('/session'); check('replayed session cookie after logout is anonymous',s==200 and b['user'] is None,b)
+s,b,_=lo.call('/submit',submit); check('replayed session cookie after logout cannot submit',s==401,(s,b))
+s,b,_=login(lo,lou); check('same device logs in again without alert',s==200 and b['login_alert'] is None,b)
 # Exercise actual application startup and HTTP Secure cookies on a separate listener.
 for secret in ['', 'short']:
     env=dict(os.environ,DEVICE_SECRET=secret)
@@ -179,7 +190,100 @@ try:
     check('LAN: login of an account already in use elsewhere is alerted',s==200 and b.get('login_alert') is not None,b)
     s,b,_=seat15.call('/register',{'username':'it_'+uuid.uuid4().hex[:14],'password':'integration-password'})
     check('LAN: seat with only an alerted login can register its own account',s==200,(s,b))
+    # Sessions created before IP binding existed have no IP and must sign in again.
+    with get_connection() as conn:
+        with conn.cursor() as cur: cur.execute("UPDATE sessions SET ip_address='' WHERE user_id=%s",(laid,))
+    s,b,_=seat11.call('/session'); check('LAN: session without a stored IP is rejected',s==200 and b['user'] is None,b)
+    s,b,_=login(seat11,la); check('LAN: signing in again restores the seat',s==200 and b['login_alert'] is None,b)
 finally:
     p.terminate(); p.wait(timeout=10)
+# Exam window and admin panel on a listener with a configured administrator.
+admin_name='it_admin_'+uuid.uuid4().hex[:8]
+proctor_name='it_proctor_'+uuid.uuid4().hex[:8]
+reserved_name='it_reserved_'+uuid.uuid4().hex[:8]
+# Admin accounts are created by the server operator, never through /register.
+create_user(admin_name,'integration-password'); create_user(proctor_name,'integration-password')
+admins=','.join([admin_name,proctor_name,reserved_name])
+p=subprocess.Popen(['uvicorn','main:app','--host','127.0.0.1','--port','18003','--no-proxy-headers'],env=dict(os.environ,ADMIN_USERNAMES=admins),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+try:
+    ex='http://127.0.0.1:18003'
+    anon=Client(base=ex)
+    for _ in range(40):
+        try:
+            if anon.call('/')[0]==200: break
+        except OSError: time.sleep(.25)
+    iso=lambda minutes:(datetime.now(timezone.utc)+timedelta(minutes=minutes)).isoformat()
+    admin=Client(base=ex)
+    s,b,_=login(admin,admin_name)
+    check('exam: configured admin is flagged',s==200 and b['user']['is_admin'] is True,(s,b))
+    for name in [reserved_name, reserved_name.upper()]:
+        s,b,_=Client(base=ex).call('/register',{'username':name,'password':'integration-password'})
+        check('admin name cannot be self-registered: '+('same case' if name==reserved_name else 'other case'),s==403,(s,b))
+    check('reserved admin name was not created',scalar('SELECT COUNT(*) FROM users WHERE username=%s',(reserved_name,))==0)
+    student=Client(base=ex); student_name,_,_=register(student)
+    s,b,_=student.call('/session'); check('exam: student is not admin',s==200 and b['user']['is_admin'] is False,b)
+    set_exam=lambda c,start,end:c.call('/admin/exam',{'start_at':start,'end_at':end})
+    check('exam: anonymous cannot set the window',set_exam(anon,iso(60),iso(120))[0]==401)
+    check('exam: student cannot set the window',set_exam(student,iso(60),iso(120))[0]==403)
+    s,b,_=set_exam(admin,iso(60),iso(120)); check('exam: admin schedules a future exam',s==200 and b['phase']=='not_started',(s,b))
+    s,b,_=anon.call('/exam'); check('exam: status is public and in UTC',s==200 and b['phase']=='not_started' and b['start_at'].endswith('Z'),b)
+    check('exam: before start anonymous cannot read problems',anon.call('/problems')[0]==401)
+    check('exam: before start student cannot read problems',student.call('/problems')[0]==403)
+    s,b,_=admin.call('/problems'); check('exam: before start admin can read problems',s==200 and len(b)>0,s)
+    s,b,_=student.call('/submit',submit); check('exam: before start student cannot submit',s==403 and '尚未開始' in b['detail'],(s,b))
+    s,b,_=admin.call('/submit',submit); check('exam: admin can submit before start',s==200 and b.get('status')=='AC',(s,b))
+    s,b,_=set_exam(admin,iso(-1),iso(60)); check('exam: admin starts the exam',s==200 and b['phase']=='running',(s,b))
+    check('exam: running anonymous cannot read problems',anon.call('/problems')[0]==401)
+    s,b,_=student.call('/problems'); check('exam: running student reads problems',s==200 and len(b)>0,s)
+    s,b,_=student.call('/submit',submit); check('exam: running student submits',s==200 and b.get('status')=='AC',(s,b))
+    s,b,_=set_exam(admin,iso(-120),iso(-60)); check('exam: admin ends the exam',s==200 and b['phase']=='ended',(s,b))
+    s,b,_=student.call('/problems'); check('exam: ended problems stay readable',s==200 and len(b)>0,s)
+    s,b,_=student.call('/submit',dict(submit,problem_id='1001')); check('exam: ended student cannot submit',s==403 and '已結束' in b['detail'],(s,b))
+    check('exam: end before start is rejected',set_exam(admin,iso(60),iso(30))[0]==400)
+    check('exam: time without offset is rejected',set_exam(admin,'2026-11-05T09:00',iso(60))[0]==400)
+    s,b,_=set_exam(admin,'',''); check('exam: admin clears the exam',s==200 and b['phase']=='open',(s,b))
+    check('exam: practice mode problems are public again',anon.call('/problems')[0]==200)
+    # Admins are exempt from one account per device in both directions.
+    proctor=Client(base=ex); proctor.cookies['oj_device']=student.cookies['oj_device']
+    s,b,_=login(proctor,proctor_name); check('admin can sign in on a device a student used',s==200,(s,b))
+    s,b,_=login(student,student_name); check('student signs in again after an admin used the device',s==200,(s,b))
+    other=Client(base=ex); other.cookies['oj_device']=student.cookies['oj_device']
+    s,b,_=other.call('/register',{'username':'it_'+uuid.uuid4().hex[:14],'password':'integration-password'})
+    check('non-admin second account on that device is still refused',s==403,(s,b))
+    # Admins are also exempt from cross-device alerts: several machines at once is normal for them.
+    desk=Client(base=ex); s,b,_=login(desk,proctor_name)
+    check('admin on another device raises no alert',s==200 and b['login_alert'] is None,(s,b))
+    check('admin second device records no alert row',scalar('SELECT COUNT(*) FROM login_security_alerts a JOIN users u ON u.id=a.user_id WHERE u.username=%s',(proctor_name,))==0)
+    s,b,_=desk.call('/submit',submit); check('admin second device can submit',s==200 and b.get('status')=='AC',(s,b))
+    s,b,_=desk.call('/session'); check('admin second device shows no warning',s==200 and b['login_alerts']==[],b)
+    # The anti-cheat window follows the exam: one hour before the start until the end.
+    def age(table,column,uid,minutes):
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f'UPDATE {table} SET {column}=NOW()-INTERVAL %s MINUTE WHERE user_id=%s',(minutes,uid))
+    for lead,counted in [(10,True),(30,False)]:
+        first=Client(base=ex); wu,wid,_=register(first); age('login_events','logged_in_at',wid,45)
+        set_exam(admin,iso(lead),iso(120))
+        s,b,_=login(Client(base=ex),wu)
+        check(f'window: login 45 min ago {"counts" if counted else "does not count"} when the exam starts in {lead} min',
+              s==200 and (b.get('login_alert') is not None)==counted,(s,b))
+    longer=Client(base=ex); lu,lid,_=register(longer)
+    set_exam(admin,iso(-300),iso(60))
+    late=Client(base=ex); s,b,_=login(late,lu)
+    check('window: second device alerted during a long exam',s==200 and b.get('login_alert') is not None,(s,b))
+    age('login_events','logged_in_at',lid,240); age('login_security_alerts','second_logged_in_at',lid,240)
+    s,b,_=late.call('/submit',submit)
+    check('window: 4-hour-old alert still blocks inside a 5-hour exam',s==403 and '本場考試期間' in b['detail'],(s,b))
+    set_exam(admin,'','')
+    s,b,_=late.call('/submit',submit); check('window: the same alert has expired in practice mode',s==200,(s,b))
+    set_exam(admin,iso(-120),iso(-60))
+    seat=Client(base=ex); register(seat)
+    s,b,_=seat.call('/register',{'username':'it_'+uuid.uuid4().hex[:14],'password':'integration-password'})
+    check('window: after the exam a device may sign in another account',s==200,(s,b))
+finally:
+    p.terminate(); p.wait(timeout=10)
+    # Never leave a schedule behind; it would apply to every listener.
+    with get_connection() as conn:
+        with conn.cursor() as cur: cur.execute('DELETE FROM exam_settings')
 print(json.dumps({'passed':sum(r[1] for r in results),'failed':sum(not r[1] for r in results)},ensure_ascii=False))
 raise SystemExit(any(not r[1] for r in results))

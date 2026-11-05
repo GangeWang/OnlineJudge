@@ -1,5 +1,6 @@
 from pathlib import Path
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import ipaddress
@@ -20,8 +21,10 @@ from database import (
     create_user,
     create_session,
     db_config,
+    delete_session,
     NO_USER_ID,
     find_recent_other_user_on_device,
+    get_exam_schedule,
     get_session,
     init_db,
     is_submission_blocked,
@@ -30,6 +33,7 @@ from database import (
     record_submission_attempt,
     record_login,
     save_submission,
+    set_exam_schedule,
 )
 
 
@@ -90,17 +94,121 @@ def root():
     return {"message": "Simple OJ Running"}
 
 
-@app.get("/problems")
-def list_problems():
+EXAM_OPEN = "open"  # no exam scheduled: open practice
+EXAM_NOT_STARTED = "not_started"
+EXAM_RUNNING = "running"
+EXAM_ENDED = "ended"
+
+
+def exam_phase(start_at: datetime | None, end_at: datetime | None, now: datetime) -> str:
+    """Phase of the exam window; all datetimes are naive UTC."""
+    if start_at is None or end_at is None:
+        return EXAM_OPEN
+    if now < start_at:
+        return EXAM_NOT_STARTED
+    if now < end_at:
+        return EXAM_RUNNING
+    return EXAM_ENDED
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _iso_utc(value: datetime | None) -> str | None:
+    return value.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z") if value else None
+
+
+def _parse_exam_time(value: str) -> datetime:
+    """Parse an ISO 8601 time with an explicit offset into naive UTC."""
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="時間格式錯誤，請使用 ISO 8601")
+    if parsed.tzinfo is None:
+        raise HTTPException(status_code=400, detail="時間必須包含時區")
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _current_exam():
+    schedule = get_exam_schedule()
+    now = _utc_now()
+    return {
+        "phase": exam_phase(schedule["start_at"], schedule["end_at"], now),
+        "start_at": _iso_utc(schedule["start_at"]),
+        "end_at": _iso_utc(schedule["end_at"]),
+        "server_now": _iso_utc(now),
+    }
+
+
+PRACTICE_WINDOW = timedelta(hours=3)
+EXAM_ENTRY_LEAD = timedelta(hours=1)
+
+
+def anti_cheat_since(start_at: datetime | None, end_at: datetime | None, now: datetime) -> float | None:
+    """Epoch seconds (UTC) from which logins and alerts count, or None when the rules are off.
+
+    Practice mode uses the last three hours. During an exam the window runs from one hour
+    before the start (early arrivals sign in then) until the end. Outside that window
+    non-admins cannot submit anyway, so the device rules are off; e.g. reviewing after the exam.
+    """
+    if start_at is None or end_at is None:
+        since = now - PRACTICE_WINDOW
+    elif start_at - EXAM_ENTRY_LEAD <= now < end_at:
+        since = start_at - EXAM_ENTRY_LEAD
+    else:
+        return None
+    return since.replace(tzinfo=timezone.utc).timestamp()
+
+
+def _anti_cheat_window() -> tuple[float | None, str]:
+    """(since, label) for the current anti-cheat window; label phrases it for messages."""
+    schedule = get_exam_schedule()
+    since = anti_cheat_since(schedule["start_at"], schedule["end_at"], _utc_now())
+    label = "三小時內" if schedule["start_at"] is None else "本場考試期間"
+    return since, label
+
+
+def _admin_usernames() -> set[str]:
+    return {name.strip() for name in os.getenv("ADMIN_USERNAMES", "").split(",") if name.strip()}
+
+
+def _is_admin(username: str) -> bool:
+    return username in _admin_usernames()
+
+
+def _public_user(user_id: int, username: str) -> dict:
+    return {"id": user_id, "username": username, "is_admin": _is_admin(username)}
+
+
+def _all_problems():
     problems_root = Path(__file__).resolve().parent / "problems"
     if not problems_root.exists():
         return []
+    return [
+        build_problem_item(problem_dir.name, problem_dir)
+        for problem_dir in sorted(path for path in problems_root.iterdir() if path.is_dir())
+    ]
 
-    problem_items = []
-    for problem_dir in sorted(path for path in problems_root.iterdir() if path.is_dir()):
-        problem_items.append(build_problem_item(problem_dir.name, problem_dir))
 
-    return problem_items
+@app.get("/exam")
+def exam_status():
+    """Exam window and server time, so clients can show a countdown against the server clock."""
+    return _current_exam()
+
+
+@app.get("/problems")
+def list_problems(request: Request):
+    phase = _current_exam()["phase"]
+    if phase == EXAM_OPEN:
+        return _all_problems()
+    session = _bound_session(request)
+    if not session:
+        raise HTTPException(status_code=401, detail="請先登入才能查看考試題目")
+    if phase == EXAM_NOT_STARTED and not _is_admin(session["username"]):
+        raise HTTPException(status_code=403, detail="考試尚未開始")
+    # Problems stay readable after the exam for review; submissions are closed in /submit.
+    return _all_problems()
 
 
 
@@ -176,13 +284,23 @@ def _browser_fingerprint(request: Request) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-MULTI_ACCOUNT_DETAIL = "此裝置三小時內已登入其他帳號，暫時無法登入"
+MULTI_ACCOUNT_DETAIL = "此裝置{window}已登入其他帳號，暫時無法登入"
 
 
 def _reject_if_device_has_other_account(
     user_id: int, username: str, device_id: str, ip: str, fingerprint: str, lan_mode: bool,
 ):
-    other_user = find_recent_other_user_on_device(user_id, device_id, ip, fingerprint, lan_mode=lan_mode)
+    # Administrators come from server configuration and may sign in at any seat, e.g. a
+    # proctor helping an examinee. Their logins also never count against other accounts.
+    if _is_admin(username):
+        return
+    since, window = _anti_cheat_window()
+    if since is None:
+        return
+    other_user = find_recent_other_user_on_device(
+        user_id, device_id, ip, fingerprint, lan_mode=lan_mode,
+        ignore_usernames=_admin_usernames(), since=since,
+    )
     if other_user:
         logger.warning(
             "Multiple-account login blocked username=%s user_id=%s ip=%s "
@@ -195,16 +313,24 @@ def _reject_if_device_has_other_account(
             other_user["username"],
             other_user["id"],
         )
-        raise HTTPException(status_code=403, detail=MULTI_ACCOUNT_DETAIL)
+        raise HTTPException(status_code=403, detail=MULTI_ACCOUNT_DETAIL.format(window=window))
 
 
 def _record_login_and_start_session(
     response: Response, user: dict, device_id: str, ip: str, fingerprint: str, lan_mode: bool,
 ):
     device_name = resolve_device_name(ip)
+    # Administrators may use several machines at once (server, proctor desk, seats).
+    is_admin = _is_admin(user["username"])
+    # Outside the anti-cheat window (since is None) logins are still recorded, without alerts.
+    since, _ = _anti_cheat_window()
+    alerts_on = not is_admin and since is not None
     _, new_alert = record_login(
         user["id"], ip, device_id, fingerprint, device_name=device_name, lan_mode=lan_mode,
+        raise_alerts=alerts_on, since=since,
     )
+    if not alerts_on:
+        new_alert = None
     if new_alert:
         logger.warning(
             "Cross-device login warning username=%s user_id=%s "
@@ -232,6 +358,11 @@ def register(request: Request, response: Response, username: str = Form(...), pa
         raise HTTPException(status_code=400, detail="帳號需為 3 到 64 個字元")
     if len(password) < 6:
         raise HTTPException(status_code=400, detail="密碼至少需要 6 個字元")
+    # Admin rights follow the username, so a configured admin name must never be claimable
+    # here. Usernames are unique case-insensitively in the database, so compare that way too.
+    if username.casefold() in {name.casefold() for name in _admin_usernames()}:
+        logger.warning("Registration of reserved admin username refused username=%s ip=%s", username, client_ip(request))
+        raise HTTPException(status_code=403, detail="此帳號名稱保留給管理者，請由伺服器管理者建立")
 
     # Registration signs the new account in, so it obeys the same rules as /login:
     # check the device before creating the account, then record the login event.
@@ -245,7 +376,7 @@ def register(request: Request, response: Response, username: str = Form(...), pa
     except IntegrityError:
         raise HTTPException(status_code=409, detail="帳號已存在")
     _record_login_and_start_session(response, user, device_id, ip, fingerprint, lan_mode)
-    return {"user": user}
+    return {"user": _public_user(user["id"], user["username"])}
 
 
 def _parse_valid_ip(value: str) -> str | None:
@@ -313,7 +444,8 @@ def _bound_session(request: Request):
     """Return the session only when presented with the device cookie it was issued to.
 
     In LAN exam mode the request must also come from the IP that signed in. A copied
-    session cookie alone therefore cannot submit from another machine.
+    session cookie alone therefore cannot submit from another machine. Sessions created
+    before IP binding existed have no IP and are rejected, so those users sign in again.
     """
     session = get_session(request.cookies.get(SESSION_COOKIE))
     if not session:
@@ -323,7 +455,7 @@ def _bound_session(request: Request):
     mismatches = []
     if request_device_id != session["device_id"]:
         mismatches.append("device")
-    if _lan_exam_mode() and session.get("ip_address") and ip != session["ip_address"]:
+    if _lan_exam_mode() and ip != session.get("ip_address"):
         mismatches.append("ip")
     if mismatches:
         logger.warning(
@@ -364,13 +496,28 @@ def login(
     lan_mode = _lan_exam_mode()
     _reject_if_device_has_other_account(user["id"], user["username"], device_id, ip, fingerprint, lan_mode)
     new_alert = _record_login_and_start_session(response, user, device_id, ip, fingerprint, lan_mode)
-    return {"user": user, "login_alert": new_alert}
+    return {"user": _public_user(user["id"], user["username"]), "login_alert": new_alert}
+
+
+@app.post("/logout")
+def logout(request: Request, response: Response):
+    """End this browser's session. Login events stay, so the three-hour device rules still apply."""
+    # Only the device the session belongs to may end it; a copied cookie elsewhere just loses it.
+    if _bound_session(request):
+        delete_session(request.cookies.get(SESSION_COOKIE))
+    response.delete_cookie(SESSION_COOKIE, httponly=True, secure=_cookie_secure(), samesite="lax")
+    return {"ok": True}
 
 
 def _session_alerts(request: Request, session):
+    if _is_admin(session["username"]):
+        return []
+    since, _ = _anti_cheat_window()
+    if since is None:
+        return []
     ip = client_ip(request)
     fingerprint = session.get("browser_fingerprint") or _browser_fingerprint(request)
-    alerts = list_login_alerts_for_user(session["user_id"])
+    alerts = list_login_alerts_for_user(session["user_id"], since)
     if _lan_exam_mode() and ip != "unknown":
         # Show the warning only on the later seat, even when it copied the first seat's device cookie.
         return [
@@ -395,7 +542,7 @@ def current_session(request: Request, response: Response):
     if not session:
         return {"user": None, "login_alerts": []}
     return {
-        "user": {"id": session["user_id"], "username": session["username"]},
+        "user": _public_user(session["user_id"], session["username"]),
         "login_alerts": _session_alerts(request, session),
     }
 
@@ -414,21 +561,30 @@ def submit(
     problem_id: str = Form(...),
 ):
     session = authenticated_session(request)
+    phase = _current_exam()["phase"]
+    # Server time decides; administrators may submit at any time to test problems.
+    if phase in (EXAM_NOT_STARTED, EXAM_ENDED) and not _is_admin(session["username"]):
+        raise HTTPException(
+            status_code=403,
+            detail="考試尚未開始，無法提交" if phase == EXAM_NOT_STARTED else "考試已結束，無法提交",
+        )
     problem_id = problem_id.strip()
     if not is_valid_problem_id(problem_id):
         raise HTTPException(status_code=400, detail="無效的題號")
     ip = client_ip(request)
     fingerprint = _browser_fingerprint(request)
-    if is_submission_blocked(
+    since, window = _anti_cheat_window()
+    if not _is_admin(session["username"]) and since is not None and is_submission_blocked(
         session["user_id"],
         session.get("device_id", ""),
         ip,
         session.get("browser_fingerprint") or fingerprint,
         lan_mode=_lan_exam_mode(),
+        since=since,
     ):
         raise HTTPException(
             status_code=403,
-            detail="偵測到三小時內有異地登入，暫時無法提交答案",
+            detail=f"偵測到{window}有異地登入，暫時無法提交答案",
         )
     retry_after = record_submission_attempt(session["user_id"], problem_id)
     if retry_after:
@@ -454,3 +610,41 @@ def submit(
 def submissions(request: Request):
     session = authenticated_session(request)
     return list_submissions(session["user_id"])
+
+
+def admin_session(request: Request):
+    session = authenticated_session(request)
+    if not _is_admin(session["username"]):
+        raise HTTPException(status_code=403, detail="需要管理者權限")
+    return session
+
+
+@app.get("/admin/exam")
+def admin_exam(request: Request):
+    admin_session(request)
+    schedule = get_exam_schedule()
+    return {
+        **_current_exam(),
+        "updated_by": schedule["updated_by"],
+        "updated_at": schedule["updated_at"].isoformat() if schedule["updated_at"] else None,
+    }
+
+
+@app.post("/admin/exam")
+def update_admin_exam(request: Request, start_at: str = Form(""), end_at: str = Form("")):
+    """Set the exam window (ISO 8601 with offset), or clear it by sending both fields empty."""
+    session = admin_session(request)
+    if not start_at.strip() and not end_at.strip():
+        start, end = None, None
+    elif not start_at.strip() or not end_at.strip():
+        raise HTTPException(status_code=400, detail="請同時設定開始與結束時間，或兩者都留空以取消考試")
+    else:
+        start, end = _parse_exam_time(start_at), _parse_exam_time(end_at)
+        if end <= start:
+            raise HTTPException(status_code=400, detail="結束時間必須晚於開始時間")
+    set_exam_schedule(start, end, session["username"])
+    logger.warning(
+        "Exam schedule changed by username=%s start_at_utc=%s end_at_utc=%s",
+        session["username"], _iso_utc(start), _iso_utc(end),
+    )
+    return admin_exam(request)

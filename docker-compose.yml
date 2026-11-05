@@ -22,6 +22,7 @@ services:
       # true when every exam seat has its own LAN IP (no NAT); see README "LAN 考試模式".
       - LAN_EXAM_MODE=${LAN_EXAM_MODE:-false}
       - ALLOW_REGISTRATION=${ALLOW_REGISTRATION:-true}
+      - ADMIN_USERNAMES=${ADMIN_USERNAMES:-}
       - DOCKER_HOST=tcp://docker-socket-proxy:2375
     volumes:
       - ./backend:/app
