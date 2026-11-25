@@ -22,7 +22,11 @@ from database import (
     create_session,
     db_config,
     delete_session,
+    exam_submission_conflict,
+    CROSS_DEVICE,
+    MULTI_ACCOUNT,
     NO_USER_ID,
+    RELOGIN,
     find_recent_other_user_on_device,
     get_exam_schedule,
     get_session,
@@ -161,12 +165,17 @@ def anti_cheat_since(start_at: datetime | None, end_at: datetime | None, now: da
     return since.replace(tzinfo=timezone.utc).timestamp()
 
 
-def _anti_cheat_window() -> tuple[float | None, str]:
-    """(since, label) for the current anti-cheat window; label phrases it for messages."""
+def _anti_cheat_window() -> tuple[float | None, str, bool]:
+    """(since, label, in_exam) for the current anti-cheat window.
+
+    label phrases the window for messages. in_exam is True inside an exam's window, where
+    the window has a fixed start; in practice mode it slides with the clock.
+    """
     schedule = get_exam_schedule()
     since = anti_cheat_since(schedule["start_at"], schedule["end_at"], _utc_now())
-    label = "三小時內" if schedule["start_at"] is None else "本場考試期間"
-    return since, label
+    scheduled = schedule["start_at"] is not None and schedule["end_at"] is not None
+    label = "本場考試期間" if scheduled else "三小時內"
+    return since, label, scheduled and since is not None
 
 
 def _admin_usernames() -> set[str]:
@@ -294,7 +303,7 @@ def _reject_if_device_has_other_account(
     # proctor helping an examinee. Their logins also never count against other accounts.
     if _is_admin(username):
         return
-    since, window = _anti_cheat_window()
+    since, window, _ = _anti_cheat_window()
     if since is None:
         return
     other_user = find_recent_other_user_on_device(
@@ -323,7 +332,7 @@ def _record_login_and_start_session(
     # Administrators may use several machines at once (server, proctor desk, seats).
     is_admin = _is_admin(user["username"])
     # Outside the anti-cheat window (since is None) logins are still recorded, without alerts.
-    since, _ = _anti_cheat_window()
+    since, _, _ = _anti_cheat_window()
     alerts_on = not is_admin and since is not None
     _, new_alert = record_login(
         user["id"], ip, device_id, fingerprint, device_name=device_name, lan_mode=lan_mode,
@@ -446,6 +455,10 @@ def _bound_session(request: Request):
     In LAN exam mode the request must also come from the IP that signed in. A copied
     session cookie alone therefore cannot submit from another machine. Sessions created
     before IP binding existed have no IP and are rejected, so those users sign in again.
+
+    Inside an exam's anti-cheat window, a session opened before the window is rejected too:
+    its login was never checked against this exam's device rules, so the examinee signs in
+    again and that login is. Administrators are exempt from those rules and keep theirs.
     """
     session = get_session(request.cookies.get(SESSION_COOKIE))
     if not session:
@@ -470,6 +483,16 @@ def _bound_session(request: Request):
             request_device_id,
         )
         return None
+    if not _is_admin(session["username"]):
+        since, _, in_exam = _anti_cheat_window()
+        created = session.get("created_epoch")
+        # A session without a creation time cannot be shown to be inside the window.
+        if in_exam and (created is None or created < since):
+            logger.info(
+                "Session rejected: opened before the exam window username=%s user_id=%s ip=%s",
+                session["username"], session["user_id"], ip,
+            )
+            return None
     return session
 
 
@@ -512,7 +535,7 @@ def logout(request: Request, response: Response):
 def _session_alerts(request: Request, session):
     if _is_admin(session["username"]):
         return []
-    since, _ = _anti_cheat_window()
+    since, _, _ = _anti_cheat_window()
     if since is None:
         return []
     ip = client_ip(request)
@@ -573,19 +596,34 @@ def submit(
         raise HTTPException(status_code=400, detail="無效的題號")
     ip = client_ip(request)
     fingerprint = _browser_fingerprint(request)
-    since, window = _anti_cheat_window()
-    if not _is_admin(session["username"]) and since is not None and is_submission_blocked(
-        session["user_id"],
-        session.get("device_id", ""),
-        ip,
-        session.get("browser_fingerprint") or fingerprint,
-        lan_mode=_lan_exam_mode(),
-        since=since,
-    ):
-        raise HTTPException(
-            status_code=403,
-            detail=f"偵測到{window}有異地登入，暫時無法提交答案",
+    since, window, in_exam = _anti_cheat_window()
+    if not _is_admin(session["username"]) and since is not None:
+        device = (
+            session["user_id"],
+            session.get("device_id", ""),
+            ip,
+            session.get("browser_fingerprint") or fingerprint,
         )
+        lan_mode = _lan_exam_mode()
+        cross_device_detail = f"偵測到{window}有異地登入，暫時無法提交答案"
+        if is_submission_blocked(*device, lan_mode=lan_mode, since=since):
+            raise HTTPException(status_code=403, detail=cross_device_detail)
+        # The login-time checks do not cover logins made while the rules were off or made
+        # at the same instant, so an exam submission is checked against the login history.
+        conflict = in_exam and exam_submission_conflict(
+            *device, lan_mode=lan_mode, ignore_usernames=_admin_usernames(), since=since,
+        )
+        if conflict:
+            logger.warning(
+                "Exam submission refused reason=%s username=%s user_id=%s ip=%s browser_device_id=%s",
+                conflict, session["username"], session["user_id"], ip, session.get("device_id", ""),
+            )
+        if conflict == RELOGIN:
+            raise HTTPException(status_code=401, detail="登入狀態已失效，請重新登入")
+        if conflict == CROSS_DEVICE:
+            raise HTTPException(status_code=403, detail=cross_device_detail)
+        if conflict == MULTI_ACCOUNT:
+            raise HTTPException(status_code=403, detail=f"此裝置{window}已登入其他帳號，暫時無法提交答案")
     retry_after = record_submission_attempt(session["user_id"], problem_id)
     if retry_after:
         raise HTTPException(

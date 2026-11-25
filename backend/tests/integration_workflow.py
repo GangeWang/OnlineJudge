@@ -225,7 +225,8 @@ try:
     set_exam=lambda c,start,end:c.call('/admin/exam',{'start_at':start,'end_at':end})
     check('exam: anonymous cannot set the window',set_exam(anon,iso(60),iso(120))[0]==401)
     check('exam: student cannot set the window',set_exam(student,iso(60),iso(120))[0]==403)
-    s,b,_=set_exam(admin,iso(60),iso(120)); check('exam: admin schedules a future exam',s==200 and b['phase']=='not_started',(s,b))
+    # Starts in 55 minutes: the window (one hour before the start) already covers the student's login.
+    s,b,_=set_exam(admin,iso(55),iso(120)); check('exam: admin schedules a future exam',s==200 and b['phase']=='not_started',(s,b))
     s,b,_=anon.call('/exam'); check('exam: status is public and in UTC',s==200 and b['phase']=='not_started' and b['start_at'].endswith('Z'),b)
     check('exam: before start anonymous cannot read problems',anon.call('/problems')[0]==401)
     check('exam: before start student cannot read problems',student.call('/problems')[0]==403)
@@ -283,6 +284,59 @@ try:
 finally:
     p.terminate(); p.wait(timeout=10)
     # Never leave a schedule behind; it would apply to every listener.
+    with get_connection() as conn:
+        with conn.cursor() as cur: cur.execute('DELETE FROM exam_settings')
+# Exam device rules must hold however a session came to exist (LAN exam mode with an administrator).
+p=subprocess.Popen(['uvicorn','main:app','--host','127.0.0.1','--port','18004','--no-proxy-headers'],env=dict(os.environ,LAN_EXAM_MODE='true',ADMIN_USERNAMES=admins),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+try:
+    lx='http://127.0.0.1:18004'
+    for _ in range(40):
+        try:
+            if Client(base=lx,ip='10.77.0.250').call('/')[0]==200: break
+        except OSError: time.sleep(.25)
+    def account():
+        name='it_'+uuid.uuid4().hex[:14]
+        return name,create_user(name,'integration-password')['id']
+    seat=lambda n:Client(base=lx,ip=f'10.77.0.{n}')
+    boss=seat(250); s,b,_=login(boss,admin_name); check('lan exam: admin signs in',s==200 and b['user']['is_admin'] is True,(s,b))
+    # 1. Signing in before the window opens (rules off) must not carry over into the exam.
+    (ua,ida),(ub,idb)=account(),account()
+    set_exam(boss,iso(90),iso(150))
+    early_a,early_b=seat(2),seat(2)  # two browsers on one seat
+    s1,_,_=login(early_a,ua); s2,_,_=login(early_b,ub)
+    check('lan exam: before the window a seat may sign in two accounts',(s1,s2)==(200,200),(s1,s2))
+    for uid in (ida,idb): age('login_events','logged_in_at',uid,95); age('sessions','created_at',uid,95)
+    s,b,_=set_exam(boss,iso(-5),iso(55)); check('lan exam: exam is running 95 minutes later',s==200 and b['phase']=='running',(s,b))
+    s,b,_=early_a.call('/session'); check('lan exam: session opened before the window is no longer accepted',s==200 and b['user'] is None,b)
+    check('lan exam: such a session cannot read the problems',early_a.call('/problems')[0]==401)
+    s,b,_=early_a.call('/submit',submit); check('lan exam: such a session cannot submit',s==401,(s,b))
+    s,b,_=boss.call('/session'); check('lan exam: admin session survives the window opening',s==200 and b['user'] is not None,b)
+    s,b,_=login(early_a,ua); check('lan exam: examinee signs in again inside the window',s==200 and b['login_alert'] is None,(s,b))
+    s,b,_=login(early_b,ub); check('lan exam: second account on that seat is now refused',s==403 and '本場考試期間' in b['detail'],(s,b))
+    s,b,_=early_a.call('/submit',submit); check('lan exam: the seat submits for its own account',s==200 and b.get('status')=='AC',(s,b))
+    own_seat=seat(1); s,b,_=login(own_seat,ua); check('lan exam: same account on another seat is alerted',s==200 and b['login_alert'] is not None,(s,b))
+    s,b,_=own_seat.call('/submit',dict(submit,problem_id='1001')); check('lan exam: the later seat cannot submit',s==403,(s,b))
+    # 2. Logins made after the exam ended (rules off) must not count once the exam is extended.
+    (ue,ide),(uf,idf),(ug,idg)=account(),account(),account()
+    home=seat(7); s,b,_=login(home,ug); check('lan exam: examinee signs in at their seat during the exam',s==200 and b['login_alert'] is None,(s,b))
+    s,b,_=set_exam(boss,iso(-70),iso(-1)); check('lan exam: exam has ended',s==200 and b['phase']=='ended',(s,b))
+    late_e,late_f=seat(6),seat(6)
+    s1,_,_=login(late_e,ue); s2,_,_=login(late_f,uf)
+    check('lan exam: after the end a seat may sign in two accounts',(s1,s2)==(200,200),(s1,s2))
+    away=seat(9); s,b,_=login(away,ug); check('lan exam: after the end another seat raises no alert',s==200 and b['login_alert'] is None,(s,b))
+    s,b,_=set_exam(boss,iso(-70),iso(30)); check('lan exam: admin extends the exam',s==200 and b['phase']=='running',(s,b))
+    s,b,_=late_e.call('/submit',submit); check('lan exam: first account on the seat can submit',s==200 and b.get('status')=='AC',(s,b))
+    s,b,_=late_f.call('/submit',submit); check('lan exam: second account on the seat cannot submit',s==403 and '已登入其他帳號' in b['detail'],(s,b))
+    s,b,_=away.call('/submit',submit); check('lan exam: account cannot submit from the later seat',s==403 and '異地登入' in b['detail'],(s,b))
+    s,b,_=home.call('/submit',submit); check('lan exam: account still submits from its first seat',s==200 and b.get('status')=='AC',(s,b))
+    check('lan exam: refused submissions are not stored',scalar('SELECT COUNT(*) FROM submissions WHERE user_id=%s',(idf,))==0)
+    # 3. Practice mode is unchanged: the window slides and old sessions stay valid.
+    set_exam(boss,'','')
+    (uh,idh)=account(); practice=seat(12); login(practice,uh)
+    age('login_events','logged_in_at',idh,200); age('sessions','created_at',idh,200)
+    s,b,_=practice.call('/submit',submit); check('practice: a session older than the window still submits',s==200 and b.get('status')=='AC',(s,b))
+finally:
+    p.terminate(); p.wait(timeout=10)
     with get_connection() as conn:
         with conn.cursor() as cur: cur.execute('DELETE FROM exam_settings')
 print(json.dumps({'passed':sum(r[1] for r in results),'failed':sum(not r[1] for r in results)},ensure_ascii=False))

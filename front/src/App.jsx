@@ -56,7 +56,9 @@ const postForm = async (url, fields) => {
     });
     const data = await res.json();
     if (!res.ok) {
-        throw new Error(data.detail || "Request failed");
+        const error = new Error(data.detail || "Request failed");
+        error.status = res.status;
+        throw error;
     }
     return data;
 };
@@ -116,11 +118,19 @@ export default function App() {
         }
     };
 
+    const clearLogin = () => {
+        setCurrentUser(null);
+        setSubmissions([]);
+        setLoginAlerts([]);
+    };
+
     const loadProblems = async () => {
         try {
             const res = await fetch("/api/problems", { credentials: "include" });
             const data = await res.json();
             if (!res.ok) {
+                // 401: the server no longer accepts this login, e.g. it predates the exam window.
+                if (res.status === 401) clearLogin();
                 setProblems([]);
                 setProblemId("");
                 setProblemsMessage(data.detail || "無法載入題目");
@@ -261,6 +271,10 @@ export default function App() {
             await loadSubmissions();
         } catch (error) {
             setResult(error.message);
+            if (error.status === 401) {
+                clearLogin();
+                setAuthMessage(error.message);
+            }
         }
     };
 

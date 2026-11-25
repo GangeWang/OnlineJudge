@@ -293,7 +293,8 @@ def get_session(token: str):
             cursor.execute(
                 """
                 SELECT sessions.user_id, sessions.device_id,
-                       sessions.browser_fingerprint, sessions.ip_address, users.username
+                       sessions.browser_fingerprint, sessions.ip_address, users.username,
+                       UNIX_TIMESTAMP(sessions.created_at) AS created_epoch
                 FROM sessions
                 JOIN users ON users.id = sessions.user_id
                 WHERE sessions.token_hash = %s
@@ -579,6 +580,86 @@ def is_submission_blocked(
                     (user_id, device_id, since),
                 )
             return cursor.fetchone() is not None
+
+
+RELOGIN = "relogin"
+CROSS_DEVICE = "cross_device"
+MULTI_ACCOUNT = "multi_account"
+
+
+def exam_submission_conflict(
+    user_id: int,
+    device_id: str,
+    ip_address: str = "",
+    browser_fingerprint: str = "",
+    lan_mode: bool = False,
+    ignore_usernames=(),
+    since: float | None = None,
+) -> str | None:
+    """Re-check the device rules from the login history when an examinee submits.
+
+    The checks at login only see the window as it was at that moment: they are skipped
+    while the rules are off (before the window opens, after the exam ends) and can be
+    raced by simultaneous logins. This derives the answer from the recorded logins inside
+    the current window instead, so it holds however the session came to exist:
+
+    - RELOGIN: this device has no login for the account inside the window.
+    - CROSS_DEVICE: the account signed in on another device first.
+    - MULTI_ACCOUNT: another account signed in on this device first.
+
+    Row ids order the logins, because timestamps only have one-second resolution.
+    """
+    since = _window_since(since)
+    if lan_mode and _known_ip(ip_address):
+        own = "(login_events.device_id = %s AND login_events.ip_address = %s)"
+        shared = "(login_events.device_id = %s OR login_events.ip_address = %s)"
+        params = [device_id, ip_address]
+    elif ip_address and browser_fingerprint:
+        own = shared = (
+            "(login_events.device_id = %s OR (login_events.ip_address = %s "
+            "AND login_events.browser_fingerprint = %s AND login_events.browser_fingerprint <> ''))"
+        )
+        params = [device_id, ip_address, browser_fingerprint]
+    else:
+        own = shared = "login_events.device_id = %s"
+        params = [device_id]
+    in_window = "UNIX_TIMESTAMP(login_events.logged_in_at) >= %s"
+    ignored = sorted(ignore_usernames)
+    ignore_clause = f"AND users.username NOT IN ({', '.join(['%s'] * len(ignored))})" if ignored else ""
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"SELECT MIN(login_events.id) AS id FROM login_events "
+                f"WHERE login_events.user_id = %s AND {own} AND {in_window}",
+                (user_id, *params, since),
+            )
+            first_here = cursor.fetchone()["id"]
+            if first_here is None:
+                return RELOGIN
+            cursor.execute(
+                f"SELECT 1 FROM login_events "
+                f"WHERE login_events.user_id = %s AND NOT {own} AND {in_window} AND login_events.id < %s LIMIT 1",
+                (user_id, *params, since, first_here),
+            )
+            if cursor.fetchone():
+                return CROSS_DEVICE
+            # As at login, a login that raised a cross-device alert does not occupy the device.
+            cursor.execute(
+                f"""
+                SELECT 1
+                FROM login_events
+                JOIN users ON users.id = login_events.user_id
+                WHERE {shared}
+                  AND login_events.user_id <> %s
+                  AND login_events.raised_alert = 0
+                  AND {in_window}
+                  AND login_events.id < %s
+                  {ignore_clause}
+                LIMIT 1
+                """,
+                (*params, user_id, since, first_here, *ignored),
+            )
+            return MULTI_ACCOUNT if cursor.fetchone() else None
 
 
 def find_recent_other_user_on_device(

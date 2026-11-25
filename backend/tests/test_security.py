@@ -97,13 +97,17 @@ DEVICE_A = "00000000-0000-4000-8000-00000000000a"
 DEVICE_B = "00000000-0000-4000-8000-00000000000b"
 
 
-def session_row(device_id=DEVICE_A, ip=SEAT_IP):
+SESSION_CREATED = 2_000_000_000  # epoch seconds, year 2033
+
+
+def session_row(device_id=DEVICE_A, ip=SEAT_IP, created_epoch=SESSION_CREATED):
     return {
         "user_id": 7,
         "username": "examinee",
         "device_id": device_id,
         "browser_fingerprint": "",
         "ip_address": ip,
+        "created_epoch": created_epoch,
     }
 
 
@@ -396,3 +400,92 @@ def test_submissions_not_blocked_when_the_window_is_closed(monkeypatch):
     assert main.submit(session_request(DEVICE_A), "c", "code", "1002")["status"] == "AC"
     monkeypatch.delenv("ADMIN_USERNAMES")
     main._reject_if_device_has_other_account(7, "examinee", DEVICE_A, SEAT_IP, "", lan_mode=True)
+
+
+RUNNING_EXAM = (datetime(2000, 1, 1), datetime(2099, 1, 1))
+RUNNING_WINDOW_OPENS = datetime(1999, 12, 31, 23, 0)  # one hour before the start
+
+
+@pytest.mark.parametrize("seconds_after_opening,accepted", [
+    (None, False),  # no creation time: cannot be shown to be inside the window
+    (-1, False),
+    (0, True),
+    (3600, True),
+])
+def test_session_opened_before_the_exam_window_is_rejected_during_the_exam(monkeypatch, seconds_after_opening, accepted):
+    created = None if seconds_after_opening is None else epoch(RUNNING_WINDOW_OPENS) + seconds_after_opening
+    monkeypatch.setattr(main, "get_exam_schedule", schedule(*RUNNING_EXAM))
+    monkeypatch.setattr(main, "get_session", lambda token: session_row(created_epoch=created))
+    assert (main._bound_session(session_request(DEVICE_A)) is not None) == accepted
+
+
+@pytest.mark.parametrize("start,end", [
+    (None, None),  # practice mode: the window slides, sessions are not tied to it
+    (datetime(2099, 1, 1), datetime(2099, 1, 2)),  # more than an hour before the start
+    (datetime(2000, 1, 1), datetime(2000, 1, 2)),  # ended
+])
+def test_old_sessions_stay_valid_outside_an_exam_window(monkeypatch, start, end):
+    monkeypatch.setattr(main, "get_exam_schedule", schedule(start, end))
+    monkeypatch.setattr(main, "get_session", lambda token: session_row(created_epoch=0))
+    assert main._bound_session(session_request(DEVICE_A)) is not None
+
+
+def test_admin_session_survives_the_exam_window_opening(monkeypatch):
+    monkeypatch.setenv("ADMIN_USERNAMES", "examinee")
+    monkeypatch.setattr(main, "get_exam_schedule", schedule(*RUNNING_EXAM))
+    monkeypatch.setattr(main, "get_session", lambda token: session_row(created_epoch=0))
+    assert main._bound_session(session_request(DEVICE_A)) is not None
+
+
+def stub_submission(monkeypatch, conflict):
+    calls = []
+
+    def exam_submission_conflict(*args, **kwargs):
+        calls.append((args, kwargs))
+        return conflict
+
+    monkeypatch.setattr(main, "get_session", lambda token: session_row())
+    monkeypatch.setattr(main, "is_submission_blocked", lambda *args, **kwargs: False)
+    monkeypatch.setattr(main, "exam_submission_conflict", exam_submission_conflict)
+    monkeypatch.setattr(main, "record_submission_attempt", lambda *args: 0)
+    monkeypatch.setattr(main, "judge_submission", lambda *args: {"status": "AC"})
+    monkeypatch.setattr(main, "save_submission", lambda *args: 9)
+    return calls
+
+
+@pytest.mark.parametrize("conflict,status,detail", [
+    (main.RELOGIN, 401, "登入狀態已失效，請重新登入"),
+    (main.CROSS_DEVICE, 403, "偵測到本場考試期間有異地登入，暫時無法提交答案"),
+    (main.MULTI_ACCOUNT, 403, "此裝置本場考試期間已登入其他帳號，暫時無法提交答案"),
+])
+def test_exam_submission_is_refused_on_a_login_history_conflict(monkeypatch, conflict, status, detail):
+    monkeypatch.setenv("ADMIN_USERNAMES", "teacher")
+    monkeypatch.setenv("LAN_EXAM_MODE", "true")
+    monkeypatch.setattr(main, "get_exam_schedule", schedule(*RUNNING_EXAM))
+    calls = stub_submission(monkeypatch, conflict)
+    monkeypatch.setattr(main, "record_submission_attempt", refuse_database)
+    with pytest.raises(HTTPException) as refused:
+        main.submit(session_request(DEVICE_A), "c", "code", "1002")
+    assert (refused.value.status_code, refused.value.detail) == (status, detail)
+    args, kwargs = calls[0]
+    assert args[:3] == (7, DEVICE_A, SEAT_IP)
+    assert kwargs == {"lan_mode": True, "ignore_usernames": {"teacher"}, "since": epoch(RUNNING_WINDOW_OPENS)}
+
+
+def test_exam_submission_passes_without_a_conflict(monkeypatch):
+    monkeypatch.setattr(main, "get_exam_schedule", schedule(*RUNNING_EXAM))
+    calls = stub_submission(monkeypatch, None)
+    assert main.submit(session_request(DEVICE_A), "c", "code", "1002")["status"] == "AC"
+    assert len(calls) == 1
+
+
+def test_login_history_check_is_for_examinees_during_an_exam_only(monkeypatch):
+    # Practice mode: the window slides, so an old login legitimately falls out of it.
+    monkeypatch.setattr(main, "get_exam_schedule", schedule(None, None))
+    stub_submission(monkeypatch, None)
+    monkeypatch.setattr(main, "exam_submission_conflict", refuse_database)
+    assert main.submit(session_request(DEVICE_A), "c", "code", "1002")["status"] == "AC"
+    # Administrators are exempt from the device rules during the exam as well.
+    monkeypatch.setenv("ADMIN_USERNAMES", "examinee")
+    monkeypatch.setattr(main, "get_exam_schedule", schedule(*RUNNING_EXAM))
+    assert main.submit(session_request(DEVICE_A), "c", "code", "1002")["status"] == "AC"
